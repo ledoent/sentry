@@ -188,6 +188,8 @@ const supportedProviders = [
   'github',
   'integrations:github',
   'integrations:github_enterprise',
+  'gitlab',
+  'integrations:gitlab',
 ];
 export const isSupportedAutofixProvider = (provider: {id: string; name: string}) => {
   return supportedProviders.includes(provider.id);
