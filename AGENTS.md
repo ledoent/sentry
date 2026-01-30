@@ -182,3 +182,45 @@ For backend testing patterns and best practices, see `tests/AGENTS.md`.
 ## Frontend
 
 For frontend development patterns, design system guidelines, and React testing best practices, see `static/AGENTS.md`.
+
+## Kencove Fork
+
+This is **kencove/sentry** - a fork of getsentry/sentry with custom modifications for our self-hosted deployment.
+
+### Key Modifications
+
+1. **GitLab Autofix Support** (`static/app/components/events/autofix/utils.tsx`)
+   - Added `'gitlab'` and `'integrations:gitlab'` to `supportedProviders` array
+   - Enables GitLab repositories for Seer Autofix feature
+
+### Building Custom Image
+
+Build and push to Google Artifact Registry:
+
+```bash
+# Using Cloud Build (recommended)
+gcloud builds submit --config=cloudbuild.yaml .
+
+# Or with custom tag
+gcloud builds submit --config=cloudbuild.yaml --substitutions=_TAG=v26.2.0-gitlab .
+```
+
+Image location: `us-central1-docker.pkg.dev/kencove-prod/kencove-docker-repo/sentry`
+
+### Syncing with Upstream
+
+```bash
+# Add upstream remote
+git remote add upstream https://github.com/getsentry/sentry.git
+
+# Cherry-pick Kencove patches onto new release
+git fetch upstream 26.2.0
+git checkout -b 26.2.0-gitlab-seer FETCH_HEAD
+git cherry-pick <kencove-commits>
+```
+
+### Related Repositories
+
+- **Seer AI Service**: [kencove/seer](https://github.com/kencove/seer) - GitLab repository client
+- **Helm Charts**: [kencove/charts](https://github.com/kencove/charts) - Deployment configuration
+- **Infra Clusters**: `~/projects/infra/clusters/helm/sentry/` - Deployment values

@@ -1,0 +1,57 @@
+# Cloud Build configuration for kencove/sentry
+# Builds custom Sentry image with GitLab Autofix support
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.yaml .
+#
+# Or with custom tag:
+#   gcloud builds submit --config=cloudbuild.yaml --substitutions=_TAG=v26.1.0-gitlab .
+#
+# Trigger on push:
+#   gcloud builds triggers create github \
+#     --repo-name=sentry --repo-owner=kencove \
+#     --branch-pattern="^master$" \
+#     --build-config=cloudbuild.yaml
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: kencove-docker-repo
+  _IMAGE_NAME: sentry
+  _TAG: ${COMMIT_SHA}
+
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # Build using multi-stage Dockerfile that handles both frontend and runtime
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+      - '-f'
+      - 'self-hosted/Dockerfile.kencove'
+      - '--build-arg'
+      - 'SOURCE_COMMIT=${COMMIT_SHA}'
+      - '--progress=plain'
+      - '.'
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}'
+    waitFor: ['build-image']
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+
+timeout: 3600s  # 1 hour - Sentry build is slow
