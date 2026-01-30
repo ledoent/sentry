@@ -1,0 +1,162 @@
+# Multi-stage Dockerfile for Kencove Sentry build
+# This builds the frontend and creates the runtime image in one Dockerfile
+#
+# Build: docker build -f self-hosted/Dockerfile.kencove -t sentry:kencove .
+
+# =============================================================================
+# Stage 1: Build frontend assets using the same Python base as runtime
+# =============================================================================
+FROM python:3.13.1-slim-bookworm AS frontend-builder
+
+WORKDIR /build
+
+# Install Node.js 22 and build tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    build-essential \
+    git \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g pnpm@9 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for Python dependency management
+RUN pip install uv==0.8.2
+
+# Copy dependency files first for layer caching
+COPY package.json pnpm-lock.yaml .node-version ./
+COPY pyproject.toml uv.lock ./
+
+# Install Node dependencies with shamefully-hoist to fix module resolution
+RUN pnpm install --frozen-lockfile --shamefully-hoist
+
+# Create Python venv and install dependencies (needed for sentry.build)
+ENV PATH="/build/.venv/bin:$PATH"
+RUN python -m venv .venv && \
+    uv sync --frozen --quiet --no-install-project
+
+# Copy source code
+COPY . .
+
+# Initialize minimal git repo for build scripts that need it
+ARG SOURCE_COMMIT=unknown
+RUN git init && \
+    git config user.email "build@kencove.com" && \
+    git config user.name "Build" && \
+    git add -A && \
+    git commit -m "Build commit" --allow-empty && \
+    echo "${SOURCE_COMMIT}" > .git/COMMIT_EDITMSG
+
+# Build frontend assets
+ENV WEBPACK_CACHE_PATH=/build/.webpack_cache
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV SENTRY_BUILD=${SOURCE_COMMIT}
+RUN python -m tools.fast_editable --path . && \
+    python -m sentry.build.main
+
+# Verify build outputs
+RUN test -f src/sentry/static/sentry/dist/entrypoints/app.js && \
+    test -f src/sentry/loader/_registry.json && \
+    echo "Frontend build verified successfully"
+
+# =============================================================================
+# Stage 2: Runtime image (same as official self-hosted/Dockerfile)
+# =============================================================================
+FROM python:3.13.1-slim-bookworm AS runtime
+
+LABEL maintainer="kencove"
+LABEL org.opencontainers.image.title="Sentry (Kencove)"
+LABEL org.opencontainers.image.description="Kencove fork with GitLab Autofix support"
+LABEL org.opencontainers.image.url="https://github.com/kencove/sentry"
+LABEL org.opencontainers.image.vendor="Kencove"
+
+# Add user and group
+RUN groupadd -r sentry --gid 999 && useradd -r -m -g sentry --uid 999 sentry
+
+# Install runtime dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gosu \
+        libexpat1 \
+        tini \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/sentry
+
+ENV PATH="/.venv/bin:$PATH" UV_PROJECT_ENVIRONMENT=/.venv \
+    PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_COMPILE_BYTECODE=1 UV_NO_CACHE=1
+
+# Install uv
+RUN python3 -m pip install --index-url 'https://pypi.devinfra.sentry.io/simple' 'uv==0.8.2'
+
+# Create venv
+RUN python3 -m venv /.venv
+
+ENV \
+  SENTRY_CONF=/etc/sentry \
+  UWSGI_NEED_PLUGIN=/var/lib/uwsgi/dogstatsd \
+  GRPC_POLL_STRATEGY=epoll1
+
+# Copy dependency files
+COPY --from=frontend-builder /build/uv.lock /build/pyproject.toml ./
+
+# Install Python dependencies and uwsgi-dogstatsd plugin
+RUN set -x \
+  && buildDeps=" \
+  gcc \
+  libpcre2-dev \
+  wget \
+  zlib1g-dev \
+  " \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends $buildDeps \
+  && uv sync --frozen --quiet --no-install-project \
+  && mkdir /tmp/uwsgi-dogstatsd \
+  && wget -O - https://github.com/DataDog/uwsgi-dogstatsd/archive/1a04f784491ab0270b4e94feb94686b65d8d2db1.tar.gz | \
+  tar -xzf - -C /tmp/uwsgi-dogstatsd --strip-components=1 \
+  && UWSGI_NEED_PLUGIN="" uwsgi --build-plugin /tmp/uwsgi-dogstatsd \
+  && mkdir -p /var/lib/uwsgi \
+  && mv dogstatsd_plugin.so /var/lib/uwsgi/ \
+  && rm -rf /tmp/uwsgi-dogstatsd .uwsgi_plugins_builder \
+  && apt-get purge -y --auto-remove $buildDeps \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/* \
+  && python -c 'import maxminddb.extension; maxminddb.extension.Reader' \
+  && mkdir -p $SENTRY_CONF
+
+# Copy entire build from frontend-builder (includes src, bin, tools, etc.)
+COPY --from=frontend-builder /build/src /usr/src/sentry/src
+COPY --from=frontend-builder /build/bin /usr/src/sentry/bin
+COPY --from=frontend-builder /build/tools /usr/src/sentry/tools
+COPY --from=frontend-builder /build/scripts /usr/src/sentry/scripts
+COPY --from=frontend-builder /build/pyproject.toml /usr/src/sentry/
+COPY --from=frontend-builder /build/setup.cfg /usr/src/sentry/
+COPY --from=frontend-builder /build/README.md /usr/src/sentry/
+
+# Install sentry package
+RUN python3 -m tools.fast_editable --path . && \
+    sentry help | sed '1,/Commands:/d' | awk '{print $1}' > /sentry-commands.txt
+
+# Copy config files
+COPY ./self-hosted/sentry.conf.py ./self-hosted/config.yml $SENTRY_CONF/
+COPY ./self-hosted/docker-entrypoint.sh /
+
+# Verify built files
+RUN test -f /usr/src/sentry/src/sentry/loader/_registry.json && \
+    test -f /usr/src/sentry/src/sentry/integration-docs/python.json && \
+    test -f /usr/src/sentry/src/sentry/static/sentry/dist/entrypoints/app.js && \
+    sentry help
+
+EXPOSE 9000
+VOLUME /data
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["run", "web"]
+
+ARG SOURCE_COMMIT
+ENV SENTRY_BUILD=${SOURCE_COMMIT:-unknown}
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/kencove/sentry/tree/${SOURCE_COMMIT:-master}/"
