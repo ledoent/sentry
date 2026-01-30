@@ -140,6 +140,14 @@ COPY --from=frontend-builder /build/README.md /usr/src/sentry/
 RUN python3 -m tools.fast_editable --path . && \
     sentry help | sed '1,/Commands:/d' | awk '{print $1}' > /sentry-commands.txt
 
+# Patch Seer URLs to use env vars (default to http://seer:9091 for K8s)
+# This must be done in the Python source so imports see the correct values
+RUN sed -i 's|SEER_DEFAULT_URL = "http://127.0.0.1:9091"|SEER_DEFAULT_URL = os.environ.get("SEER_URL", "http://seer:9091")|' \
+    /usr/src/sentry/src/sentry/conf/server.py && \
+    sed -i 's|SEER_RPC_SHARED_SECRET: list\[str\] | None = None|SEER_RPC_SHARED_SECRET = os.environ.get("SEER_RPC_SHARED_SECRET", "").split(",") if os.environ.get("SEER_RPC_SHARED_SECRET") else None|' \
+    /usr/src/sentry/src/sentry/conf/server.py && \
+    echo "Seer URLs patched successfully"
+
 # Copy config files
 COPY ./self-hosted/sentry.conf.py ./self-hosted/config.yml $SENTRY_CONF/
 COPY ./self-hosted/docker-entrypoint.sh /
