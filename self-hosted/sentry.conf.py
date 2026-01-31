@@ -251,3 +251,10 @@ if "SENTRY_RUNNING_GRANIAN" not in os.environ and len(secret_key) < 32:
 
 SENTRY_OPTIONS["system.secret-key"] = secret_key
 SENTRY_USE_RELAY = True
+
+##############################################
+# Feature Flags for Self-Hosted
+##############################################
+# Disable Explorer-based autofix (not available in self-hosted Seer)
+# This forces Sentry to use the legacy /v1/automation/autofix/start endpoint
+SENTRY_FEATURES["organizations:seer-explorer"] = False
