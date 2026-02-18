@@ -22,6 +22,9 @@ from sentry.seer.signed_seer_api import sign_with_seer_secret
 from sentry.seer.utils import filter_repo_by_provider
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 
+from sentry.constants import ObjectStatus
+from sentry.models.repository import Repository
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,8 +35,8 @@ class BranchOverrideSerializer(CamelSnakeSerializer):
 
 
 class RepositorySerializer(CamelSnakeSerializer):
-    organization_id = serializers.IntegerField(required=True)
-    integration_id = serializers.CharField(required=True)
+    organization_id = serializers.IntegerField(required=False, allow_null=True)
+    integration_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     provider = serializers.CharField(required=True)
     owner = serializers.CharField(required=True)
     name = serializers.CharField(required=True)
@@ -121,12 +124,26 @@ class ProjectSeerPreferencesEndpoint(ProjectEndpoint):
 
             repo_data["organization_id"] = project.organization.id
 
-            repo_exists = filter_repo_by_provider(
+            # Try matching by provider + external_id + owner/name first
+            repo_qs = filter_repo_by_provider(
                 project.organization.id, provider, external_id, owner, name
-            ).exists()
+            )
+            if not repo_qs.exists():
+                # Fallback: match by external_id only (handles GitLab repos where
+                # Seer stores simplified owner/name that differs from DB format)
+                repo_qs = Repository.objects.filter(
+                    organization_id=project.organization.id,
+                    external_id=external_id,
+                    status=ObjectStatus.ACTIVE,
+                )
+                if not repo_qs.exists():
+                    return Response({"detail": "Invalid repository"}, status=400)
 
-            if not repo_exists:
-                return Response({"detail": "Invalid repository"}, status=400)
+            # Fill in integration_id from the matched repo if not provided
+            if not repo_data.get("integration_id"):
+                repo = repo_qs.first()
+                if repo and repo.integration_id:
+                    repo_data["integration_id"] = str(repo.integration_id)
 
         path = "/v1/project-preference/set"
         body = orjson.dumps(
