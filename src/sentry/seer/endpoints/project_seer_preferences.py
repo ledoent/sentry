@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -9,7 +11,9 @@ from sentry.api.api_publish_status import ApiPublishStatus
 from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.project import ProjectEndpoint, ProjectEventPermission
 from sentry.api.serializers.rest_framework import CamelSnakeSerializer
+from sentry.constants import ObjectStatus
 from sentry.models.project import Project
+from sentry.models.repository import Repository
 from sentry.ratelimits.config import RateLimitConfig
 from sentry.seer.autofix.utils import (
     deduplicate_repositories,
@@ -24,10 +28,15 @@ from sentry.seer.models import PreferenceResponse, SeerProjectPreference
 from sentry.seer.utils import filter_repo_by_provider
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 
+logger = logging.getLogger(__name__)
+
 
 class RepositorySerializer(BaseRepositorySerializer):
-    organization_id = serializers.IntegerField(required=True)
-    integration_id = serializers.CharField(required=True)
+    # ledoent/kencove fork: make org_id + integration_id optional. Self-hosted
+    # single-org deployments and GitLab repos don't always carry these on the
+    # request; we fill them in from the matched DB row in the endpoint below.
+    organization_id = serializers.IntegerField(required=False, allow_null=True)
+    integration_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class SeerAutomationHandoffConfigurationSerializer(CamelSnakeSerializer):
@@ -108,12 +117,28 @@ class ProjectSeerPreferencesEndpoint(ProjectEndpoint):
 
             repo_data["organization_id"] = project.organization.id
 
-            repo = filter_repo_by_provider(
+            # Try matching by provider + external_id + owner/name first.
+            repo_qs = filter_repo_by_provider(
                 project.organization.id, provider, external_id, owner, name
-            ).first()
+            )
+            repo = repo_qs.first()
             if repo is None:
-                return Response({"detail": "Invalid repository"}, status=400)
+                # ledoent/kencove fork: fallback matches by external_id only.
+                # Handles GitLab repos where Seer stores a simplified
+                # owner/name that differs from the DB format.
+                repo = Repository.objects.filter(
+                    organization_id=project.organization.id,
+                    external_id=external_id,
+                    status=ObjectStatus.ACTIVE,
+                ).first()
+                if repo is None:
+                    return Response({"detail": "Invalid repository"}, status=400)
             repo_data["repository_id"] = repo.id
+
+            # Fill in integration_id from the matched repo if the request
+            # didn't include one (also kencove fork — see optional fields above).
+            if not repo_data.get("integration_id") and repo.integration_id:
+                repo_data["integration_id"] = str(repo.integration_id)
 
         preference = SeerProjectPreference.validate(
             {
