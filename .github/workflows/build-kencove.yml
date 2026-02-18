@@ -3,11 +3,11 @@ name: Build Kencove Sentry Image
 on:
   push:
     branches:
-      - master
+      - '*-kencove'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag (e.g., v26.1.0-gitlab)'
+        description: 'Image tag override (default: commit SHA)'
         required: false
         default: ''
 
@@ -27,58 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: '.node-version'
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: '0.8.2'
-
-      - name: Setup Python venv
-        run: |
-          uv venv
-          source .venv/bin/activate
-          echo "PATH=$PWD/.venv/bin:$PATH" >> $GITHUB_ENV
-
-      - name: Cache webpack
-        uses: actions/cache@v4
-        with:
-          path: .webpack_cache
-          key: webpack-${{ hashFiles('rspack.config.ts') }}
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        id: node-cache
-        with:
-          path: node_modules
-          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
-
-      - name: Install Node dependencies
-        if: steps.node-cache.outputs.cache-hit != 'true'
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        run: |
-          python3 -m tools.fast_editable --path .
-          python3 -m sentry.build.main
-        env:
-          WEBPACK_CACHE_PATH: .webpack_cache
-          NODE_OPTIONS: '--max-old-space-size=4096'
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: 'projects/103143301688/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-actions@kencove-prod.iam.gserviceaccount.com'
+          workload_identity_provider: 'projects/103143301688/locations/global/workloadIdentityPools/github-wlif/providers/github-oidc'
+          service_account: 'github-actions-seer@kencove-prod.iam.gserviceaccount.com'
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
       - name: Determine image tag
         id: tag
@@ -89,19 +45,11 @@ jobs:
             echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and push Docker image
+      - name: Submit Cloud Build
         run: |
-          docker build \
-            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }} \
-            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest \
-            -f self-hosted/Dockerfile \
-            --build-arg SOURCE_COMMIT=${{ github.sha }} \
+          gcloud builds submit \
+            --config=cloudbuild.yaml \
+            --substitutions=COMMIT_SHA=${{ github.sha }},_TAG=${{ steps.tag.outputs.tag }} \
+            --project=${{ env.PROJECT_ID }} \
+            --async \
             .
-
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
-
-      - name: Output image info
-        run: |
-          echo "## Build Complete" >> $GITHUB_STEP_SUMMARY
-          echo "Image: \`${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
