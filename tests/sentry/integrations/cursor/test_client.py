@@ -150,57 +150,6 @@ class CursorAgentClientTest(TestCase):
     @patch.object(CursorAgentClient, "post")
     def test_launch_with_empty_branch_name_uses_default(self, mock_post: Mock) -> None:
         """Test that launch() excludes ref when branch_name is empty, allowing Cursor to use repo default"""
-        # Setup mock response
-        mock_response = Mock()
-        mock_response.json = {
-            "id": "agent_123",
-            "status": "running",
-            "name": "Test Agent",
-            "createdAt": "2023-01-01T00:00:00Z",
-            "source": {
-                "repository": "https://github.com/getsentry/sentry",
-                "ref": "main",  # Cursor returns the resolved default branch
-            },
-            "target": {
-                "url": "https://cursor.com/agent/123",
-                "autoCreatePr": False,
-                "branchName": "fix-bug-123",
-            },
-        }
-        mock_post.return_value = mock_response
-
-        # Create repo definition with empty branch_name
-        repo_definition_empty_branch = SeerRepoDefinition(
-            integration_id="111",
-            provider="github",
-            owner="getsentry",
-            name="sentry",
-            external_id="123456",
-            branch_name="",  # Empty string
-        )
-
-        request = CodingAgentLaunchRequest(
-            prompt="Fix this bug",
-            repository=repo_definition_empty_branch,
-            branch_name="fix-bug-123",
-        )
-
-        # Launch the agent
-        self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
-
-        # Assert that post was called with correct parameters
-        mock_post.assert_called_once()
-        call_kwargs = mock_post.call_args[1]
-
-        # Verify the payload does NOT contain ref (it's excluded when None)
-        # This allows Cursor to use the repo's default branch
-        payload = call_kwargs["data"]
-        assert "ref" not in payload["source"]
-
-    @patch.object(CursorAgentClient, "post")
-    def test_launch_with_none_branch_name_uses_default(self, mock_post: Mock) -> None:
-        """Test that launch() excludes ref when branch_name is None, allowing Cursor to use repo default"""
-        # Setup mock response
         mock_response = Mock()
         mock_response.json = {
             "id": "agent_123",
@@ -219,7 +168,51 @@ class CursorAgentClientTest(TestCase):
         }
         mock_post.return_value = mock_response
 
-        # Create repo definition with None branch_name
+        repo_definition_empty_branch = SeerRepoDefinition(
+            integration_id="111",
+            provider="github",
+            owner="getsentry",
+            name="sentry",
+            external_id="123456",
+            branch_name="",
+        )
+
+        request = CodingAgentLaunchRequest(
+            prompt="Fix this bug",
+            repository=repo_definition_empty_branch,
+            branch_name="fix-bug-123",
+        )
+
+        self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+
+        # Verify the payload does NOT contain ref (it's excluded when None)
+        payload = call_kwargs["data"]
+        assert "ref" not in payload["source"]
+
+    @patch.object(CursorAgentClient, "post")
+    def test_launch_with_none_branch_name_uses_default(self, mock_post: Mock) -> None:
+        """Test that launch() excludes ref when branch_name is None, allowing Cursor to use repo default"""
+        mock_response = Mock()
+        mock_response.json = {
+            "id": "agent_123",
+            "status": "running",
+            "name": "Test Agent",
+            "createdAt": "2023-01-01T00:00:00Z",
+            "source": {
+                "repository": "https://github.com/getsentry/sentry",
+                "ref": "main",
+            },
+            "target": {
+                "url": "https://cursor.com/agent/123",
+                "autoCreatePr": False,
+                "branchName": "fix-bug-123",
+            },
+        }
+        mock_post.return_value = mock_response
+
         repo_definition_none_branch = SeerRepoDefinition(
             integration_id="111",
             provider="github",
@@ -235,13 +228,141 @@ class CursorAgentClientTest(TestCase):
             branch_name="fix-bug-123",
         )
 
-        # Launch the agent
         self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
 
-        # Assert that post was called with correct parameters
         mock_post.assert_called_once()
         call_kwargs = mock_post.call_args[1]
 
-        # Verify the payload does NOT contain ref
         payload = call_kwargs["data"]
         assert "ref" not in payload["source"]
+
+    @patch.object(CursorAgentClient, "post")
+    def test_launch_gitlab_repo(self, mock_post: Mock) -> None:
+        """Test that launch() builds a GitLab URL and sets openAsCursorGithubApp=False"""
+        mock_response = Mock()
+        mock_response.json = {
+            "id": "agent_456",
+            "status": "running",
+            "name": "GitLab Agent",
+            "createdAt": "2023-01-01T00:00:00Z",
+            "source": {
+                "repository": "https://gitlab.com/kencove/operations/odoo",
+                "ref": "16.0",
+            },
+            "target": {
+                "url": "https://cursor.com/agent/456",
+                "autoCreatePr": True,
+                "branchName": "fix-bug-456",
+            },
+        }
+        mock_post.return_value = mock_response
+
+        gitlab_repo = SeerRepoDefinition(
+            integration_id="222",
+            provider="integrations:gitlab",
+            owner="kencove/operations",
+            name="odoo",
+            external_id="gitlab.com:12345",
+            branch_name="16.0",
+        )
+
+        request = CodingAgentLaunchRequest(
+            prompt="Fix this bug",
+            repository=gitlab_repo,
+            branch_name="fix-bug-456",
+            auto_create_pr=True,
+        )
+
+        self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["data"]
+
+        # GitLab URL should use the instance from external_id
+        assert payload["source"]["repository"] == "https://gitlab.com/kencove/operations/odoo"
+        # openAsCursorGithubApp should be False for GitLab
+        assert payload["target"]["openAsCursorGithubApp"] is False
+
+    @patch.object(CursorAgentClient, "post")
+    def test_launch_self_hosted_gitlab_repo(self, mock_post: Mock) -> None:
+        """Test that launch() handles self-hosted GitLab instances"""
+        mock_response = Mock()
+        mock_response.json = {
+            "id": "agent_789",
+            "status": "running",
+            "name": "Self-hosted GitLab Agent",
+            "createdAt": "2023-01-01T00:00:00Z",
+            "source": {
+                "repository": "https://gitlab.forgeflow.io/kencove/project",
+                "ref": "main",
+            },
+            "target": {
+                "url": "https://cursor.com/agent/789",
+                "autoCreatePr": False,
+                "branchName": "fix-bug-789",
+            },
+        }
+        mock_post.return_value = mock_response
+
+        gitlab_repo = SeerRepoDefinition(
+            integration_id="333",
+            provider="integrations:gitlab",
+            owner="kencove",
+            name="project",
+            external_id="gitlab.forgeflow.io:128",
+            branch_name="main",
+        )
+
+        request = CodingAgentLaunchRequest(
+            prompt="Fix this bug",
+            repository=gitlab_repo,
+            branch_name="fix-bug-789",
+        )
+
+        self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["data"]
+
+        # Should use the self-hosted instance from external_id
+        assert payload["source"]["repository"] == "https://gitlab.forgeflow.io/kencove/project"
+        assert payload["target"]["openAsCursorGithubApp"] is False
+
+    @patch.object(CursorAgentClient, "post")
+    def test_launch_github_repo_sets_github_app_true(self, mock_post: Mock) -> None:
+        """Test that GitHub repos still set openAsCursorGithubApp=True"""
+        mock_response = Mock()
+        mock_response.json = {
+            "id": "agent_123",
+            "status": "running",
+            "name": "Test Agent",
+            "createdAt": "2023-01-01T00:00:00Z",
+            "source": {
+                "repository": "https://github.com/getsentry/sentry",
+                "ref": "main",
+            },
+            "target": {
+                "url": "https://cursor.com/agent/123",
+                "autoCreatePr": True,
+                "branchName": "fix-bug-123",
+            },
+        }
+        mock_post.return_value = mock_response
+
+        request = CodingAgentLaunchRequest(
+            prompt="Fix this bug",
+            repository=self.repo_definition,
+            branch_name="fix-bug-123",
+            auto_create_pr=True,
+        )
+
+        self.cursor_client.launch(webhook_url=self.webhook_url, request=request)
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["data"]
+
+        assert payload["source"]["repository"] == "https://github.com/getsentry/sentry"
+        assert payload["target"]["openAsCursorGithubApp"] is True

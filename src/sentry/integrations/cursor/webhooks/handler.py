@@ -198,19 +198,30 @@ class CursorWebhookEndpoint(Endpoint):
             repo_url = f"https://{repo_url}"
 
         parsed = urlparse(repo_url)
-        if parsed.netloc != "github.com":
+        netloc = parsed.netloc
+
+        if netloc == "github.com":
+            repo_provider = "github"
+        elif "gitlab" in netloc:
+            repo_provider = "integrations:gitlab"
+        else:
             logger.warning(
-                "cursor_webhook.not_github_repo",
-                extra={"agent_id": agent_id, "repo": repo_url},
+                "cursor_webhook.unsupported_repo_host",
+                extra={"agent_id": agent_id, "repo": repo_url, "netloc": netloc},
             )
             return
 
-        repo_provider = "github"
         repo_full_name = parsed.path.lstrip("/")
 
-        # If the repo isn't in the owner/repo format we can't work with it
-        # Allow dots in the repository name segment (owner.repo is common)
-        if not re.match(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$", repo_full_name):
+        # Validate repo path format:
+        # GitHub: owner/repo (2 segments)
+        # GitLab: group/subgroup/.../project (2+ segments, supports nested groups)
+        if repo_provider == "github":
+            valid = re.match(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$", repo_full_name)
+        else:
+            valid = re.match(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+){1,}$", repo_full_name)
+
+        if not valid:
             logger.warning(
                 "cursor_webhook.repo_format_invalid",
                 extra={"agent_id": agent_id, "source": source},

@@ -40,9 +40,8 @@ from sentry.shared_integrations.exceptions import ApiError
 logger = logging.getLogger(__name__)
 
 
-# Follows the GitHub branch name rules:
+# Follows Git branch name rules:
 # https://docs.github.com/en/get-started/using-git/dealing-with-special-characters-in-branch-and-tag-names#naming-branches-and-tags
-# As our coding agent integration only supports launching on GitHub right now.
 VALID_BRANCH_NAME_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_/"
 
 

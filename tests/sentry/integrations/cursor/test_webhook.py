@@ -192,8 +192,8 @@ class TestCursorWebhook(APITestCase):
         assert resp.status_code == 204
         mock_update_state.assert_not_called()
 
-        # Non-github host
-        payload = self._build_status_payload(repo="https://gitlab.com/testorg/testrepo")
+        # Unsupported host (not github or gitlab)
+        payload = self._build_status_payload(repo="https://bitbucket.org/testorg/testrepo")
         body = orjson.dumps(payload)
         headers = self._signed_headers(body)
         with Feature({"organizations:seer-coding-agent-integrations": True}):
@@ -228,6 +228,85 @@ class TestCursorWebhook(APITestCase):
             resp = self._post_with_headers(body, headers)
         assert resp.status_code == 204
         assert mock_update_state.call_count == 1
+
+    @patch("sentry.integrations.cursor.webhooks.handler.update_coding_agent_state")
+    def test_gitlab_repo_accepted(self, mock_update_state):
+        """GitLab repos should be accepted and set provider to integrations:gitlab"""
+        payload = self._build_status_payload(
+            repo="https://gitlab.com/kencove/operations/odoo",
+            pr_url="https://gitlab.com/kencove/operations/odoo/-/merge_requests/1",
+        )
+        body = orjson.dumps(payload)
+        headers = self._signed_headers(body)
+
+        with Feature({"organizations:seer-coding-agent-integrations": True}):
+            resp = self._post_with_headers(body, headers)
+
+        assert resp.status_code == 204
+        assert mock_update_state.call_count == 1
+        _, kwargs = mock_update_state.call_args
+        result = kwargs["result"]
+        assert result.repo_provider == "integrations:gitlab"
+        assert result.repo_full_name == "kencove/operations/odoo"
+
+    @patch("sentry.integrations.cursor.webhooks.handler.update_coding_agent_state")
+    def test_gitlab_nested_groups(self, mock_update_state):
+        """GitLab repos with deeply nested groups should be accepted"""
+        payload = self._build_status_payload(
+            repo="https://gitlab.com/org/group/subgroup/project",
+            pr_url=None,
+        )
+        body = orjson.dumps(payload)
+        headers = self._signed_headers(body)
+
+        with Feature({"organizations:seer-coding-agent-integrations": True}):
+            resp = self._post_with_headers(body, headers)
+
+        assert resp.status_code == 204
+        assert mock_update_state.call_count == 1
+        _, kwargs = mock_update_state.call_args
+        result = kwargs["result"]
+        assert result.repo_full_name == "org/group/subgroup/project"
+        assert result.repo_provider == "integrations:gitlab"
+
+    @patch("sentry.integrations.cursor.webhooks.handler.update_coding_agent_state")
+    def test_self_hosted_gitlab_accepted(self, mock_update_state):
+        """Self-hosted GitLab instances (with 'gitlab' in domain) should be accepted"""
+        payload = self._build_status_payload(
+            repo="https://gitlab.forgeflow.io/kencove/project",
+            pr_url=None,
+        )
+        body = orjson.dumps(payload)
+        headers = self._signed_headers(body)
+
+        with Feature({"organizations:seer-coding-agent-integrations": True}):
+            resp = self._post_with_headers(body, headers)
+
+        assert resp.status_code == 204
+        assert mock_update_state.call_count == 1
+        _, kwargs = mock_update_state.call_args
+        result = kwargs["result"]
+        assert result.repo_provider == "integrations:gitlab"
+        assert result.repo_full_name == "kencove/project"
+
+    @patch("sentry.integrations.cursor.webhooks.handler.update_coding_agent_state")
+    def test_gitlab_no_scheme(self, mock_update_state):
+        """GitLab repo without https:// scheme should be accepted"""
+        payload = self._build_status_payload(
+            repo="gitlab.com/testorg/testrepo",
+            pr_url=None,
+        )
+        body = orjson.dumps(payload)
+        headers = self._signed_headers(body)
+
+        with Feature({"organizations:seer-coding-agent-integrations": True}):
+            resp = self._post_with_headers(body, headers)
+
+        assert resp.status_code == 204
+        assert mock_update_state.call_count == 1
+        _, kwargs = mock_update_state.call_args
+        result = kwargs["result"]
+        assert result.repo_provider == "integrations:gitlab"
 
     @patch("sentry.integrations.cursor.webhooks.handler.update_coding_agent_state")
     def test_signature_without_prefix(self, mock_update_state):

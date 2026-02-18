@@ -14,8 +14,35 @@ from sentry.integrations.cursor.models import (
     CursorApiKeyMetadata,
 )
 from sentry.seer.autofix.utils import CodingAgentProviderType, CodingAgentState, CodingAgentStatus
+from sentry.seer.models import SeerRepoDefinition
 
 logger = logging.getLogger(__name__)
+
+GITHUB_PROVIDERS = {"github", "integrations:github", "integrations:github_enterprise"}
+GITLAB_PROVIDERS = {"integrations:gitlab"}
+
+
+def _build_repo_url(repo: SeerRepoDefinition) -> str:
+    """Build the repository URL based on the provider type.
+
+    GitHub: https://github.com/owner/name
+    GitLab: https://{instance}/owner/name (instance parsed from external_id "host:project_id")
+    Fallback: GitHub URL for backwards compatibility.
+    """
+    provider = repo.provider
+    if provider in GITLAB_PROVIDERS:
+        instance = "gitlab.com"
+        if repo.external_id and ":" in repo.external_id:
+            instance = repo.external_id.split(":", 1)[0]
+        return f"https://{instance}/{repo.owner}/{repo.name}"
+
+    # GitHub and fallback
+    return f"https://github.com/{repo.owner}/{repo.name}"
+
+
+def _is_github_provider(provider: str) -> bool:
+    """Return True if the provider is a GitHub variant."""
+    return provider in GITHUB_PROVIDERS or provider not in GITLAB_PROVIDERS
 
 
 class CursorAgentClient(CodingAgentClient):
@@ -51,12 +78,15 @@ class CursorAgentClient(CodingAgentClient):
 
     def launch(self, webhook_url: str, request: CodingAgentLaunchRequest) -> CodingAgentState:
         """Launch coding agent with webhook callback."""
+        repo_url = _build_repo_url(request.repository)
+        is_github = _is_github_provider(request.repository.provider)
+
         payload = CursorAgentLaunchRequestBody(
             prompt=CursorAgentLaunchRequestPrompt(
                 text=request.prompt,
             ),
             source=CursorAgentSource(
-                repository=f"https://github.com/{request.repository.owner}/{request.repository.name}",
+                repository=repo_url,
                 # Use None for empty branch_name so Cursor uses repo's default branch
                 ref=request.repository.branch_name or None,
             ),
@@ -64,7 +94,7 @@ class CursorAgentClient(CodingAgentClient):
             target=CursorAgentLaunchRequestTarget(
                 autoCreatePr=request.auto_create_pr,
                 branchName=request.branch_name,
-                openAsCursorGithubApp=True,
+                openAsCursorGithubApp=is_github,
             ),
         )
 
