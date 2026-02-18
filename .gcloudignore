@@ -5,8 +5,8 @@
 .venv/
 .webpack_cache/
 node_modules/
-fixtures/
-tests/
+/fixtures/
+/tests/
 *.pyc
 __pycache__/
 .coverage*
