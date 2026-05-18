@@ -45,7 +45,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history so sentry.build can derive the version
+          fetch-depth: 0 # full history so sentry.build can derive the version
 
       - name: Free disk space
         run: |
