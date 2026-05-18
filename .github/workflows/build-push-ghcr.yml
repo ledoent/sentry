@@ -22,12 +22,20 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ledoent/sentry
 
+# Cancel any in-flight build for the same ref when a new push lands. Saves
+# ~30 GHA minutes per force-push and prevents two builds from racing to
+# publish the same mutable tag.
+concurrency:
+  group: build-push-ghcr-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
-    # Large runner: Sentry frontend build uses NODE_OPTIONS=4096; needs more
-    # RAM than the default ubuntu-latest 7GB. GitHub's free tier ubuntu-latest
-    # may OOM during webpack — switch to ubuntu-latest-large or a self-hosted
-    # runner if that happens.
+    # ubuntu-latest is 16 GB RAM on GitHub-hosted free runners as of 2026
+    # (was 7 GB before the 2024 Larger Hosted Runners refresh). The Sentry
+    # frontend build uses NODE_OPTIONS=4096 in Dockerfile.kencove; our first
+    # build completed in ~12 min on this runner. Bump to ubuntu-latest-large
+    # (32 GB) only if webpack starts OOMing.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,11 +49,17 @@ jobs:
 
       - name: Free disk space
         run: |
-          # Sentry's build needs lots of disk; trim runner-preinstalled junk.
+          # Sentry's build is disk-hungry; trim runner-preinstalled toolchains
+          # we don't use. Each rm is best-effort against a wildcard so a path
+          # being absent doesn't fail the build — but we keep the *step* exit
+          # status real so an unrelated failure (e.g., the docker prune) still
+          # surfaces.
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune -af || true
+          for path in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL; do
+            [ -e "$path" ] && sudo rm -rf "$path"
+          done
+          sudo docker image prune -af
           df -h /
 
       - name: Set up Docker Buildx
