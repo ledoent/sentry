@@ -60,7 +60,13 @@ RUN python3 -m compileall -q \
     /usr/src/sentry/src/sentry/conf/server.py \
     /etc/sentry/sentry.conf.py
 
-USER sentry
+# Leave the image as USER root to match upstream getsentry/sentry's
+# state. The self-hosted install.sh layers another image on top of
+# this one (the nodestore-s3 overlay at /opt/sentry/sentry/Dockerfile)
+# which runs `pip install` and needs to overwrite root-owned files in
+# /.venv. If we end as `USER sentry`, that pip install fails with
+# Permission denied. Upstream's docker-entrypoint.sh runs as root and
+# uses gosu to drop to the sentry user at process-start time anyway.
 
 ARG SOURCE_COMMIT
 ENV SENTRY_BUILD=${SOURCE_COMMIT:-unknown}
