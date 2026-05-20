@@ -1,168 +1,69 @@
-# Multi-stage Dockerfile for Kencove Sentry build
-# This builds the frontend and creates the runtime image in one Dockerfile
+# Ledoent/Kencove self-hosted Sentry image.
 #
-# Build: docker build -f self-hosted/Dockerfile.kencove -t sentry:kencove .
+# Strategy (changed in the 26.5.0 rebase): use the upstream
+# `getsentry/sentry:26.5.0` image as a base and overlay our small set
+# of backend patches + the self-hosted SEER_URL fix. Previously we
+# rebuilt frontend + backend from source, but upstream's frontend
+# build pipeline (rspack + type-loader.ts) is more involved than we
+# want to maintain across version bumps. The pre-built upstream image
+# is the same one Sentry's own CI publishes, so we inherit upstream's
+# frontend bundle for free.
+#
+# Our patches in this image:
+#   1. `src/sentry/seer/endpoints/project_seer_preferences.py` — make
+#      organization_id and integration_id optional + add a GitLab
+#      external_id fallback in the POST endpoint (self-hosted +
+#      GitLab repos sometimes don't have those fields)
+#   2. `src/sentry/conf/server.py` — patch `SEER_DEFAULT_URL` to read
+#      from `$SEER_URL` env, defaulting to `http://seer:9091` (the
+#      in-cluster service name)
+#   3. `self-hosted/sentry.conf.py` — disable the `seer-explorer`
+#      feature flag for self-hosted
+#
+# Frontend kencove patches (GitLab in supportedProviders) are
+# obsolete in 26.5.0 — upstream's BASE_SUPPORTED_PROVIDERS already
+# includes `gitlab` and `integrations:gitlab`, and added a
+# feature-flag-gated mechanism (`seer-gitlab-support`) on top.
 
-# =============================================================================
-# Stage 1: Build frontend assets using the same Python base as runtime
-# =============================================================================
-FROM python:3.13.1-slim-bookworm AS frontend-builder
+ARG UPSTREAM_TAG=26.5.0
+FROM ghcr.io/getsentry/sentry:${UPSTREAM_TAG}
 
-WORKDIR /build
+USER root
 
-# Install Node.js 22 and build tools
-RUN apt-get update && apt-get install -y \
-    curl \
-    gnupg \
-    build-essential \
-    git \
-    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g pnpm@10 \
-    && rm -rf /var/lib/apt/lists/*
-# Upstream 26.5.0 .node-version pins 24.14.0 + package.json
-# packageManager pins pnpm@10.30.2. Older toolchains hit
-# ERR_PNPM_LOCKFILE_CONFIG_MISMATCH on the new patchedDependencies
-# lockfile format.
+# 1. Overlay our patched serializer.
+COPY src/sentry/seer/endpoints/project_seer_preferences.py \
+     /usr/src/sentry/src/sentry/seer/endpoints/project_seer_preferences.py
 
-# Install uv for Python dependency management
-RUN pip install uv==0.9.28
+# 2. Patch SEER_URL in conf/server.py. Upstream defaults to
+#    127.0.0.1:9091 (single-host setup); we run seer as a separate
+#    container so we need the docker network DNS name. Allow override
+#    via $SEER_URL env at runtime so non-cluster deploys can point
+#    elsewhere without rebuilding the image.
+RUN sed -i \
+    's#SEER_DEFAULT_URL = "http://127.0.0.1:9091"#SEER_DEFAULT_URL = os.environ.get("SEER_URL", "http://seer:9091")#' \
+    /usr/src/sentry/src/sentry/conf/server.py \
+ && grep -q 'SEER_DEFAULT_URL = os.environ.get' \
+    /usr/src/sentry/src/sentry/conf/server.py \
+ && echo "SEER_URL patch applied"
 
-# Copy dependency files first for layer caching. patches/ is needed
-# before pnpm install because upstream 26.5.0's lockfile references
-# patches/zod@4.3.5.patch via pnpm's `patchedDependencies` field.
-COPY package.json pnpm-lock.yaml .node-version ./
-COPY patches/ ./patches/
-COPY pyproject.toml uv.lock ./
+# 3. Overlay our self-hosted Sentry config (turns off seer-explorer
+#    feature flag among other tweaks). config.yml stays as upstream's
+#    default since /opt/sentry/sentry/config.yml mounts over it at
+#    runtime on the VM.
+COPY self-hosted/sentry.conf.py /etc/sentry/sentry.conf.py
 
-# Install Node dependencies with shamefully-hoist to fix module resolution
-RUN pnpm install --frozen-lockfile --shamefully-hoist
+# 4. Recompile the touched .py files so the runtime doesn't pay the
+#    JIT compile cost on first request.
+RUN python3 -m compileall -q \
+    /usr/src/sentry/src/sentry/seer/endpoints/project_seer_preferences.py \
+    /usr/src/sentry/src/sentry/conf/server.py \
+    /etc/sentry/sentry.conf.py
 
-# Create Python venv and install dependencies (needed for sentry.build)
-ENV PATH="/build/.venv/bin:$PATH"
-RUN python -m venv .venv && \
-    uv sync --frozen --quiet --no-install-project
-
-# Copy source code
-COPY . .
-
-# Initialize minimal git repo for build scripts that need it
-ARG SOURCE_COMMIT=unknown
-RUN git init && \
-    git config user.email "build@kencove.com" && \
-    git config user.name "Build" && \
-    git add -A && \
-    git commit -m "Build commit" --allow-empty && \
-    echo "${SOURCE_COMMIT}" > .git/COMMIT_EDITMSG
-
-# Build frontend assets
-ENV WEBPACK_CACHE_PATH=/build/.webpack_cache
-ENV NODE_OPTIONS="--max-old-space-size=4096"
-ENV SENTRY_BUILD=${SOURCE_COMMIT}
-RUN python -m tools.fast_editable --path . && \
-    python -m sentry.build.main
-
-# Verify build outputs
-RUN test -f src/sentry/static/sentry/dist/entrypoints/app.js && \
-    test -f src/sentry/loader/_registry.json && \
-    echo "Frontend build verified successfully"
-
-# =============================================================================
-# Stage 2: Runtime image (same as official self-hosted/Dockerfile)
-# =============================================================================
-FROM python:3.13.1-slim-bookworm AS runtime
-
-LABEL maintainer="kencove"
-LABEL org.opencontainers.image.title="Sentry (Kencove)"
-LABEL org.opencontainers.image.description="Kencove fork with GitLab Autofix support"
-LABEL org.opencontainers.image.url="https://github.com/kencove/sentry"
-LABEL org.opencontainers.image.vendor="Kencove"
-
-# Add user and group
-RUN groupadd -r sentry --gid 999 && useradd -r -m -g sentry --uid 999 sentry
-
-# Install runtime dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        gosu \
-        libexpat1 \
-        tini \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /usr/src/sentry
-
-ENV PATH="/.venv/bin:$PATH" UV_PROJECT_ENVIRONMENT=/.venv \
-    PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    UV_COMPILE_BYTECODE=1 UV_NO_CACHE=1
-
-# Install uv
-RUN python3 -m pip install --index-url 'https://pypi.devinfra.sentry.io/simple' 'uv==0.9.28'
-
-# Create venv
-RUN python3 -m venv /.venv
-
-ENV \
-  SENTRY_CONF=/etc/sentry \
-  GRPC_POLL_STRATEGY=epoll1
-
-# Copy dependency files
-COPY --from=frontend-builder /build/uv.lock /build/pyproject.toml ./
-
-# Install Python dependencies
-RUN set -x \
-  && buildDeps=" \
-  gcc \
-  libpcre2-dev \
-  wget \
-  zlib1g-dev \
-  " \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends $buildDeps \
-  && uv sync --frozen --quiet --no-install-project \
-  && apt-get purge -y --auto-remove $buildDeps \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/* \
-  && python -c 'import maxminddb.extension; maxminddb.extension.Reader' \
-  && mkdir -p $SENTRY_CONF
-
-# Copy entire build from frontend-builder (includes src, bin, tools, etc.)
-COPY --from=frontend-builder /build/src /usr/src/sentry/src
-COPY --from=frontend-builder /build/bin /usr/src/sentry/bin
-COPY --from=frontend-builder /build/tools /usr/src/sentry/tools
-COPY --from=frontend-builder /build/scripts /usr/src/sentry/scripts
-COPY --from=frontend-builder /build/pyproject.toml /usr/src/sentry/
-COPY --from=frontend-builder /build/setup.cfg /usr/src/sentry/
-COPY --from=frontend-builder /build/README.md /usr/src/sentry/
-
-# Install sentry package
-RUN python3 -m tools.fast_editable --path . && \
-    sentry help | sed '1,/Commands:/d' | awk '{print $1}' > /sentry-commands.txt
-
-# Patch Seer URLs to use env vars (default to http://seer:9091 for K8s)
-# This must be done in the Python source so imports see the correct values
-RUN sed -i 's#SEER_DEFAULT_URL = "http://127.0.0.1:9091"#SEER_DEFAULT_URL = os.environ.get("SEER_URL", "http://seer:9091")#' \
-    /usr/src/sentry/src/sentry/conf/server.py && \
-    grep -q 'SEER_DEFAULT_URL = os.environ.get' /usr/src/sentry/src/sentry/conf/server.py && \
-    echo "Seer URLs patched successfully"
-
-# Copy config files
-COPY ./self-hosted/sentry.conf.py ./self-hosted/config.yml $SENTRY_CONF/
-COPY ./self-hosted/docker-entrypoint.sh /
-
-# Verify built files
-RUN test -f /usr/src/sentry/src/sentry/loader/_registry.json && \
-    test -f /usr/src/sentry/src/sentry/integration-docs/python.json && \
-    test -f /usr/src/sentry/src/sentry/static/sentry/dist/entrypoints/app.js && \
-    sentry help
-
-EXPOSE 9000
-VOLUME /data
-
-ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["run", "web"]
+USER sentry
 
 ARG SOURCE_COMMIT
 ENV SENTRY_BUILD=${SOURCE_COMMIT:-unknown}
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
-LABEL org.opencontainers.image.source="https://github.com/kencove/sentry/tree/${SOURCE_COMMIT:-master}/"
+LABEL org.opencontainers.image.source="https://github.com/ledoent/sentry/tree/${SOURCE_COMMIT:-26.5.0-kencove}/"
+LABEL org.opencontainers.image.title="Sentry (ledoent / kencove fork)"
+LABEL org.opencontainers.image.description="getsentry/sentry:26.5.0 + ledoent backend patches"
