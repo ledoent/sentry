@@ -1,16 +1,16 @@
 name: Build and Push Sentry to GHCR (Public)
 
 # Publishes a public ledoent fork of self-hosted Sentry to GitHub Container Registry.
-# Companion to build-kencove.yml (kencove-prod Cloud Build). This workflow exists
+# Companion to build-kencove.yml (kencove-prod GCP Cloud Build, legacy). This workflow exists
 # so self-hosted Sentry+Seer deployments can pull without GCP credentials.
 
 on:
   push:
     branches:
-      - '*-kencove'
+      - '*-ledoent'
       - feat/build-push-ghcr
     tags:
-      - 'v*-kencove'
+      - 'v*-ledoent'
   workflow_dispatch:
     inputs:
       tag:
@@ -33,7 +33,7 @@ jobs:
   build-and-push:
     # ubuntu-latest is 16 GB RAM on GitHub-hosted free runners as of 2026
     # (was 7 GB before the 2024 Larger Hosted Runners refresh). The Sentry
-    # frontend build uses NODE_OPTIONS=4096 in Dockerfile.kencove; our first
+    # frontend build uses NODE_OPTIONS=4096 in Dockerfile.ledoent; our first
     # build completed in ~12 min on this runner. Bump to ubuntu-latest-large
     # (32 GB) only if webpack starts OOMing.
     runs-on: ubuntu-latest
@@ -103,7 +103,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: self-hosted/Dockerfile.kencove
+          file: self-hosted/Dockerfile.ledoent
           platforms: linux/amd64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
@@ -112,7 +112,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/ledoent/sentry
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=Sentry (ledoent / kencove fork)
+            org.opencontainers.image.title=Sentry (ledoent fork)
             org.opencontainers.image.description=Self-hosted Sentry with SEER_URL env support
           cache-from: type=gha
           cache-to: type=gha,mode=max
