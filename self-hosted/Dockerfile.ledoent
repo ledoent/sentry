@@ -1,0 +1,70 @@
+# Ledoent/Kencove self-hosted Sentry image.
+#
+# Strategy (changed in the 26.5.0 rebase): use the upstream
+# `getsentry/sentry:26.5.0` image as a base and overlay our small set
+# of backend patches + the self-hosted SEER_URL fix. Previously we
+# rebuilt frontend + backend from source, but upstream's frontend
+# build pipeline (rspack + type-loader.ts) is more involved than we
+# want to maintain across version bumps. The pre-built upstream image
+# is the same one Sentry's own CI publishes, so we inherit upstream's
+# frontend bundle for free.
+#
+# Our patches in this image:
+#   1. `src/sentry/seer/endpoints/project_seer_preferences.py` — make
+#      organization_id and integration_id optional + add a GitLab
+#      external_id fallback in the POST endpoint (self-hosted +
+#      GitLab repos sometimes don't have those fields)
+#   2. `src/sentry/conf/server.py` — patch `SEER_DEFAULT_URL` to read
+#      from `$SEER_URL` env, defaulting to `http://seer:9091` (the
+#      in-cluster service name)
+#   3. `self-hosted/sentry.conf.py` — disable the `seer-explorer`
+#      feature flag for self-hosted
+#
+# The legacy kencove-fork frontend patch (adding GitLab to
+# `supportedProviders`) is obsolete in 26.5.0 — upstream's
+# BASE_SUPPORTED_PROVIDERS already includes `gitlab` and
+# `integrations:gitlab`, with a feature-flag-gated provider
+# mechanism (`seer-gitlab-support`) layered on top.
+
+ARG UPSTREAM_TAG=26.5.0
+FROM ghcr.io/getsentry/sentry:${UPSTREAM_TAG}
+
+USER root
+
+# 1. Overlay our patched serializer.
+COPY src/sentry/seer/endpoints/project_seer_preferences.py \
+     /usr/src/sentry/src/sentry/seer/endpoints/project_seer_preferences.py
+
+# 2. Patch SEER_URL in conf/server.py. Upstream defaults to
+#    127.0.0.1:9091 (single-host setup); we run seer as a separate
+#    container so we need the docker network DNS name. Allow override
+#    via $SEER_URL env at runtime so non-cluster deploys can point
+#    elsewhere without rebuilding the image.
+RUN sed -i \
+    's#SEER_DEFAULT_URL = "http://127.0.0.1:9091"#SEER_DEFAULT_URL = os.environ.get("SEER_URL", "http://seer:9091")#' \
+    /usr/src/sentry/src/sentry/conf/server.py \
+ && grep -q 'SEER_DEFAULT_URL = os.environ.get' \
+    /usr/src/sentry/src/sentry/conf/server.py \
+ && echo "SEER_URL patch applied"
+
+# 3. Overlay our self-hosted Sentry config (turns off seer-explorer
+#    feature flag among other tweaks). config.yml stays as upstream's
+#    default since /opt/sentry/sentry/config.yml mounts over it at
+#    runtime on the VM.
+COPY self-hosted/sentry.conf.py /etc/sentry/sentry.conf.py
+
+# 4. Recompile the touched .py files so the runtime doesn't pay the
+#    JIT compile cost on first request.
+RUN python3 -m compileall -q \
+    /usr/src/sentry/src/sentry/seer/endpoints/project_seer_preferences.py \
+    /usr/src/sentry/src/sentry/conf/server.py \
+    /etc/sentry/sentry.conf.py
+
+USER sentry
+
+ARG SOURCE_COMMIT
+ENV SENTRY_BUILD=${SOURCE_COMMIT:-unknown}
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/ledoent/sentry/tree/${SOURCE_COMMIT:-26.5.0-ledoent}/"
+LABEL org.opencontainers.image.title="Sentry (ledoent fork)"
+LABEL org.opencontainers.image.description="getsentry/sentry:26.5.0 + ledoent backend patches"

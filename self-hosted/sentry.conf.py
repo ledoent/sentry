@@ -6,6 +6,23 @@
 import os
 import os.path
 
+##############################################
+# CRITICAL: Patch Seer URLs before any imports
+# This must happen BEFORE `from sentry.conf.server import *`
+# to ensure all code sees the correct Seer service URLs
+##############################################
+import sentry.conf.server as _sentry_server
+_sentry_server.SEER_DEFAULT_URL = os.environ.get("SEER_URL", "http://seer:9091")
+_sentry_server.SEER_AUTOFIX_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_SIMILARITY_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_ANOMALY_DETECTION_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_SEVERITY_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_BREAKPOINT_DETECTION_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_GROUPING_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_SUMMARIZATION_URL = _sentry_server.SEER_DEFAULT_URL
+_sentry_server.SEER_RPC_SHARED_SECRET = os.environ.get("SEER_RPC_SHARED_SECRET", "").split(",") if os.environ.get("SEER_RPC_SHARED_SECRET") else None
+##############################################
+
 # For Docker, the following environment variables are supported:
 #  SENTRY_POSTGRES_HOST
 #  SENTRY_POSTGRES_PORT
@@ -234,3 +251,10 @@ if "SENTRY_RUNNING_GRANIAN" not in os.environ and len(secret_key) < 32:
 
 SENTRY_OPTIONS["system.secret-key"] = secret_key
 SENTRY_USE_RELAY = True
+
+##############################################
+# Feature Flags for Self-Hosted
+##############################################
+# Disable Explorer-based autofix (not available in self-hosted Seer)
+# This forces Sentry to use the legacy /v1/automation/autofix/start endpoint
+SENTRY_FEATURES["organizations:seer-explorer"] = False

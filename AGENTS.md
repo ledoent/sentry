@@ -256,3 +256,53 @@ Frontend (`static/`) and backend (`src/`, `tests/`) are **not atomically deploye
 - If your changes touch both frontend and backend, split them into **separate PRs**.
 - Land the backend PR first when the frontend depends on new API changes.
 - Pure test additions alongside `src/` changes are fine in one PR.
+
+## Kencove Fork
+
+This is **ledoent/sentry** (originally kencove/sentry) — a fork of getsentry/sentry with custom modifications for our self-hosted deployment.
+
+### Key Modifications
+
+1. **GitLab Autofix Support** (`static/app/components/events/autofix/utils.tsx`)
+   - Added `'gitlab'` and `'integrations:gitlab'` to `supportedProviders` array
+   - Enables GitLab repositories for Seer Autofix feature
+   - Note: upstream 26.5.0 added GitLab support behind `organizations:seer-gitlab-support` feature flag; this patch may be redundant. Verify before keeping in future rebases.
+
+2. **Seer endpoints serializer** (`src/sentry/seer/endpoints/project_seer_preferences.py`)
+   - Make `org_id` and `integration_id` optional to handle Seer's repo format differences for self-hosted single-org deployments
+
+3. **Cursor / GitLab integration** (`src/sentry/integrations/cursor/*`)
+   - Custom GitLab repo URL builder + webhook handler
+
+4. **Self-hosted SEER_URL patch** (`self-hosted/Dockerfile.patch`)
+   - Patches `server.py` during Docker build so `SEER_DEFAULT_URL` defaults to the in-cluster seer service
+
+### Building Custom Image
+
+The primary build now ships to GHCR:
+
+```bash
+# Via the GHCR workflow (default — produces ghcr.io/ledoent/sentry:<branch>-kencove)
+gh workflow run build-push-ghcr.yml --ref <branch>-kencove
+
+# Legacy Cloud Build path (kencove-prod GCP, still works)
+gcloud builds submit --config=cloudbuild.yaml .
+```
+
+### Syncing with Upstream
+
+```bash
+git fetch upstream <new-version>
+git checkout -b <new-version>-kencove <new-version>
+git log --reverse --format=%H <prev-version>..origin/<prev-version>-kencove \
+  | xargs -I{} git cherry-pick {}
+# Resolve conflicts (typically in src/sentry/seer/autofix/coding_agent.py
+# and src/sentry/seer/endpoints/project_seer_preferences.py)
+git push origin <new-version>-kencove
+```
+
+### Related Repositories
+
+- **Seer AI Service**: [ledoent/seer](https://github.com/ledoent/seer) - GitLab repository client
+- **Helm Charts**: [kencove/charts](https://github.com/kencove/charts) - Deployment configuration
+- **Infra Clusters**: `~/projects/ledoent/infra/deployments/` - Deployment values

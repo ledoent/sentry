@@ -1,0 +1,127 @@
+name: Build and Push Sentry to GHCR (Public)
+
+# Publishes a public ledoent fork of self-hosted Sentry to GitHub Container Registry.
+# Companion to build-kencove.yml (kencove-prod GCP Cloud Build, legacy). This workflow exists
+# so self-hosted Sentry+Seer deployments can pull without GCP credentials.
+
+on:
+  push:
+    branches:
+      - '*-ledoent'
+      - feat/build-push-ghcr
+    tags:
+      - 'v*-ledoent'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag override (default: branch-shortsha)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ledoent/sentry
+
+# Cancel any in-flight build for the same ref when a new push lands. Saves
+# ~30 GHA minutes per force-push and prevents two builds from racing to
+# publish the same mutable tag.
+concurrency:
+  group: build-push-ghcr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    # ubuntu-latest is 16 GB RAM on GitHub-hosted free runners as of 2026
+    # (was 7 GB before the 2024 Larger Hosted Runners refresh). The Sentry
+    # frontend build uses NODE_OPTIONS=4096 in Dockerfile.ledoent; our first
+    # build completed in ~12 min on this runner. Bump to ubuntu-latest-large
+    # (32 GB) only if webpack starts OOMing.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so sentry.build can derive the version
+
+      - name: Free disk space
+        run: |
+          # Sentry's build is disk-hungry; trim runner-preinstalled toolchains
+          # we don't use. Each rm is best-effort against a wildcard so a path
+          # being absent doesn't fail the build — but we keep the *step* exit
+          # status real so an unrelated failure (e.g., the docker prune) still
+          # surfaces.
+          df -h /
+          for path in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL; do
+            [ -e "$path" ] && sudo rm -rf "$path"
+          done
+          sudo docker image prune -af
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags
+        id: tags
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          BRANCH_TAG=$(echo "$REF_NAME" | sed 's|[^a-zA-Z0-9._-]|-|g' | cut -c1-60)
+
+          TAGS="${IMAGE}:${BRANCH_TAG}-${SHA_SHORT}"
+          TAGS="${TAGS},${IMAGE}:${BRANCH_TAG}"
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAGS="${TAGS},${IMAGE}:${INPUT_TAG}"
+          fi
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAGS="${TAGS},${IMAGE}:${REF_NAME}"
+          fi
+
+          {
+            echo "tags=${TAGS}"
+            echo "sha_short=${SHA_SHORT}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Generated tags: ${TAGS}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: self-hosted/Dockerfile.ledoent
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/ledoent/sentry
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Sentry (ledoent fork)
+            org.opencontainers.image.description=Self-hosted Sentry with SEER_URL env support
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### Sentry pushed to GHCR :rocket:"
+            echo ""
+            echo "**Tags:**"
+            echo '${{ steps.tags.outputs.tags }}' | tr ',' '\n' | sed 's/^/- `/' | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -192,6 +192,8 @@ const BASE_SUPPORTED_PROVIDERS = [
   'integrations:github',
   'github_enterprise',
   'integrations:github_enterprise',
+  'gitlab',
+  'integrations:gitlab',
 ];
 
 /**

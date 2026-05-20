@@ -1,0 +1,13 @@
+# Cloud Build source upload ignore
+# gcloud builds submit uses this to exclude files from the source tarball
+.devenv/
+.git/
+.venv/
+.webpack_cache/
+node_modules/
+/fixtures/
+/tests/
+*.pyc
+__pycache__/
+.coverage*
+.DS_Store
