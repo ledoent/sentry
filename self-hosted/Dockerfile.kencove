@@ -24,8 +24,11 @@ RUN apt-get update && apt-get install -y \
 # Install uv for Python dependency management
 RUN pip install uv==0.9.28
 
-# Copy dependency files first for layer caching
+# Copy dependency files first for layer caching. patches/ is needed
+# before pnpm install because upstream 26.5.0's lockfile references
+# patches/zod@4.3.5.patch via pnpm's `patchedDependencies` field.
 COPY package.json pnpm-lock.yaml .node-version ./
+COPY patches/ ./patches/
 COPY pyproject.toml uv.lock ./
 
 # Install Node dependencies with shamefully-hoist to fix module resolution
