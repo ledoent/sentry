@@ -16,10 +16,14 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     build-essential \
     git \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g pnpm@9 \
+    && npm install -g pnpm@10 \
     && rm -rf /var/lib/apt/lists/*
+# Upstream 26.5.0 .node-version pins 24.14.0 + package.json
+# packageManager pins pnpm@10.30.2. Older toolchains hit
+# ERR_PNPM_LOCKFILE_CONFIG_MISMATCH on the new patchedDependencies
+# lockfile format.
 
 # Install uv for Python dependency management
 RUN pip install uv==0.9.28
