@@ -1,0 +1,80 @@
+name: Sync master from upstream
+
+# Keeps ledoent/sentry@master fast-forwarded to getsentry/sentry@master
+# so PR conflict-detection actually reflects reality. Without this, the
+# fork's master sits frozen at whatever commit it was created from, and
+# every PR from a `*-kencove` rebase branch shows GitHub's "this branch
+# has conflicts" — even though the kencove patches themselves don't.
+#
+# Runs:
+#   * Hourly via cron (cheap; FFs typically a few commits at most)
+#   * On-demand via workflow_dispatch
+#
+# Fast-forward only — never force-push. If upstream's master diverges
+# in a way that requires a merge commit (e.g. we cherry-picked something
+# from upstream into our master), this job skips the FF and writes a
+# warning to the job summary. A human follow-up is needed in that case.
+
+on:
+  schedule:
+    - cron: "17 * * * *"  # hourly, offset to avoid the top-of-hour rush
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-master
+  cancel-in-progress: false  # let an in-flight sync finish
+
+permissions:
+  contents: write  # needed to push the FF to master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0  # full history so we can FF-detect against upstream
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/getsentry/sentry.git
+          git fetch upstream master --tags
+
+      - name: Fast-forward master
+        id: ff
+        run: |
+          LOCAL_SHA=$(git rev-parse HEAD)
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          echo "local=$LOCAL_SHA"     >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$LOCAL_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "result=already-current" >> "$GITHUB_OUTPUT"
+            echo "✓ master already at upstream/master ($UPSTREAM_SHA)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # FF only — refuses if local has commits not in upstream
+          if git merge --ff-only upstream/master; then
+            echo "result=fast-forwarded" >> "$GITHUB_OUTPUT"
+            echo "✓ master fast-forwarded $LOCAL_SHA → $UPSTREAM_SHA" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "result=diverged" >> "$GITHUB_OUTPUT"
+            BEHIND=$(git rev-list --count HEAD..upstream/master)
+            AHEAD=$(git rev-list --count upstream/master..HEAD)
+            {
+              echo "⚠ master has diverged from upstream"
+              echo ""
+              echo "* local commits not in upstream: $AHEAD"
+              echo "* upstream commits not in local: $BEHIND"
+              echo ""
+              echo "Resolve manually — fast-forward is no longer possible."
+              echo "Either rebase + force-push master, or restore from upstream."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Push fast-forwarded master
+        if: steps.ff.outputs.result == 'fast-forwarded'
+        run: git push origin master
