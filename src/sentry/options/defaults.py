@@ -1546,6 +1546,21 @@ register(
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
 
+# Brownout schedule for the deprecated alerts API endpoints.
+# 1 minute blackout 6 times a day (every 4 hours, on the hour, UTC).
+register(
+    "api.deprecation.alerts-cron",
+    default="0 */4 * * *",
+    type=String,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+register(
+    "api.deprecation.alerts-duration",
+    type=Int,
+    default=60,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+
 # Option to disable misbehaving use case IDs
 register(
     "sentry-metrics.indexer.disabled-namespaces",
@@ -3707,14 +3722,6 @@ register(
     "provision_organization.override.rate",
     type=Float,
     default=0.0,
-    flags=FLAG_AUTOMATOR_MODIFIABLE,
-)
-# TODO(cells): Fully rolled out and no longer read anywhere. Unregister once the
-# value is removed from sentry-options-automator.
-register(
-    "cells.use-control-org-listing",
-    type=Bool,
-    default=False,
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
 
