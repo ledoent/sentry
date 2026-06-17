@@ -10,6 +10,13 @@ from sentry.models.organizationmember import InviteStatus, OrganizationMember
 from sentry.models.release import Release
 from sentry.models.team import Team, TeamStatus
 from sentry.seer.autofix.constants import FixabilityScoreThresholds
+from sentry.seer.sentry_data_models import (
+    FilterKeyValuesResponse,
+    IssueFilterBuiltInField,
+    IssueFilterKeysResponse,
+    IssuesStatsResponse,
+    TagFilterKeyValue,
+)
 from sentry.snuba.dataset import Dataset
 from sentry.snuba.referrer import Referrer
 from sentry.types.group import PriorityLevel
@@ -418,7 +425,7 @@ def get_issue_filter_keys(
     stats_period: str | None = None,
     start: str | None = None,
     end: str | None = None,
-) -> dict[str, Any] | None:
+) -> IssueFilterKeysResponse | None:
     """
     Get available issue filter keys (tags, feature flags, and built-in fields).
 
@@ -510,11 +517,11 @@ def get_issue_filter_keys(
     tag_keys = [tag.get("key") for tag in tags if tag.get("key")]
     built_in_fields = _get_built_in_issue_fields(organization, project_ids, tag_keys)
 
-    return {
-        "tags": tags,
-        "feature_flags": feature_flags,
-        "built_in_fields": built_in_fields,
-    }
+    return IssueFilterKeysResponse(
+        tags=tags,
+        feature_flags=feature_flags,
+        built_in_fields=[IssueFilterBuiltInField(**f) for f in built_in_fields],
+    )
 
 
 def get_filter_key_values(
@@ -526,7 +533,7 @@ def get_filter_key_values(
     stats_period: str | None = None,
     start: str | None = None,
     end: str | None = None,
-) -> list[dict[str, Any]] | None:
+) -> FilterKeyValuesResponse | None:
     """
     Get values for a specific filter key.
 
@@ -568,9 +575,7 @@ def get_filter_key_values(
             org_id=org_id, project_ids=project_ids, stats_period=stats_period, start=start, end=end
         )
         if filter_keys_result:
-            tag_keys = [
-                tag.get("key") for tag in filter_keys_result.get("tags", []) if tag.get("key")
-            ]
+            tag_keys = [key for tag in filter_keys_result.tags if (key := tag.get("key"))]
 
     built_in_values = _get_built_in_field_values(attribute_key, organization, project_ids, tag_keys)
     if built_in_values is not None:
@@ -579,7 +584,7 @@ def get_filter_key_values(
             built_in_values = [
                 val for val in built_in_values if substring.lower() in val.get("value", "").lower()
             ]
-        return built_in_values
+        return FilterKeyValuesResponse(__root__=[TagFilterKeyValue(**v) for v in built_in_values])
 
     # Not a built-in field, query tags endpoint
     api_key = ApiKey(organization_id=organization.id, scope_list=API_KEY_SCOPES)
@@ -655,7 +660,7 @@ def get_filter_key_values(
 
     result = list(merged.values())
     result.sort(key=lambda x: x["count"], reverse=True)
-    return result
+    return FilterKeyValuesResponse(__root__=[TagFilterKeyValue(**v) for v in result])
 
 
 def execute_issues_query(
@@ -734,7 +739,7 @@ def get_issues_stats(
     stats_period: str | None = None,
     start: str | None = None,
     end: str | None = None,
-) -> list[dict[str, Any]] | None:
+) -> IssuesStatsResponse | None:
     """
     Get stats for specific issues by calling the issues-stats endpoint.
 
@@ -761,7 +766,7 @@ def get_issues_stats(
         return None
 
     if not issue_ids:
-        return []
+        return IssuesStatsResponse(__root__=[])
 
     api_key = ApiKey(organization_id=organization.id, scope_list=API_KEY_SCOPES)
 
@@ -784,4 +789,4 @@ def get_issues_stats(
         params=params,
     )
 
-    return resp.data
+    return IssuesStatsResponse(__root__=resp.data)

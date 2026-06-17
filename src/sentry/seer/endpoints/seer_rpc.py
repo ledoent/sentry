@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import Any, TypedDict
 
 import sentry_sdk
-from cryptography.fernet import Fernet
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ObjectDoesNotExist
@@ -15,6 +14,7 @@ from django.db.models import Q
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.timestamp_pb2 import Timestamp as ProtobufTimestamp
 from pydantic import BaseModel
+from requests.exceptions import RequestException
 from rest_framework.exceptions import (
     APIException,
     AuthenticationFailed,
@@ -43,14 +43,17 @@ from sentry.api.authentication import AuthenticationSiloLimit, StandardAuthentic
 from sentry.api.base import Endpoint, internal_cell_silo_endpoint
 from sentry.api.endpoints.project_trace_item_details import convert_rpc_attribute_to_json
 from sentry.api.utils import get_date_range_from_params
+from sentry.auth.exceptions import IdentityNotValid
 from sentry.constants import ObjectStatus
 from sentry.exceptions import InvalidSearchQuery
 from sentry.features.base import OrganizationFeature
 from sentry.hybridcloud.rpc.service import RpcAuthenticationSetupException, RpcResolutionException
 from sentry.hybridcloud.rpc.sig import SerializableFunctionValueException
+from sentry.identity import default_manager as identity_manager
+from sentry.identity.services.identity import identity_service
 from sentry.integrations.github_enterprise.integration import GitHubEnterpriseIntegration
 from sentry.integrations.services.integration import integration_service
-from sentry.integrations.types import IntegrationProviderSlug
+from sentry.integrations.types import MONITORING_PROVIDERS, IntegrationProviderSlug
 from sentry.models.organization import Organization, OrganizationStatus
 from sentry.models.project import Project
 from sentry.models.pullrequest import (
@@ -126,6 +129,9 @@ from sentry.seer.issue_detection import create_issue_occurrence
 from sentry.seer.models.seer_api_models import SeerProjectPreference
 from sentry.seer.seer_setup import get_supported_scm_providers
 from sentry.seer.sentry_data_models import (
+    AttributeBucket,
+    AttributesAndValuesResponse,
+    BulkProjectPreferencesResponse,
     GetRepoInstallationIdErrorResponse,
     GetRepoInstallationIdSuccessResponse,
     GitHubEnterpriseConfigErrorResponse,
@@ -136,6 +142,7 @@ from sentry.seer.sentry_data_models import (
     OrganizationProject,
     OrganizationProjectIdsResponse,
     OrganizationSlugResponse,
+    PrAttributionResponse,
     RepositoryIntegrationsStatusResponse,
     SendSeerWebhookErrorResponse,
     SendSeerWebhookSuccessResponse,
@@ -144,9 +151,10 @@ from sentry.seer.sentry_data_models import (
     ValidateRepoErrorResponse,
     ValidateRepoSuccessResponse,
 )
-from sentry.seer.utils import filter_repo_by_provider
+from sentry.seer.utils import encrypt_access_token_for_seer, filter_repo_by_provider
 from sentry.sentry_apps.metrics import SentryAppEventType
 from sentry.sentry_apps.tasks.sentry_apps import broadcast_webhooks_for_organization
+from sentry.shared_integrations.exceptions import ApiError
 from sentry.silo.base import SiloMode
 from sentry.snuba.referrer import Referrer
 from sentry.users.services.user.service import user_service
@@ -413,7 +421,7 @@ def get_attributes_and_values(
     max_attributes: int = 1000,
     sampled: bool = True,
     attributes_ignored: list[str] | None = None,
-) -> dict:
+) -> AttributesAndValuesResponse:
     """
     Fetches all string attributes and the corresponding values with counts for a given period.
     """
@@ -483,7 +491,7 @@ def get_attributes_and_values(
         definitions=SPAN_DEFINITIONS,
     )
 
-    attributes_and_values: dict[str, list[dict[str, Any]]] = {}
+    attributes_and_values: dict[str, list[AttributeBucket]] = {}
     for result in rpc_response.results:
         for attribute in result.attribute_distributions.attributes:
             try:
@@ -496,16 +504,11 @@ def get_attributes_and_values(
                 if attribute_name not in attributes_and_values:
                     attributes_and_values[attribute_name] = []
                 attributes_and_values[attribute_name].extend(
-                    [
-                        {
-                            "value": value.label,
-                            "count": value.value,
-                        }
-                        for value in attribute.buckets
-                    ]
+                    AttributeBucket(value=value.label, count=value.value)
+                    for value in attribute.buckets
                 )
 
-    return {"attributes_and_values": attributes_and_values}
+    return AttributesAndValuesResponse(attributes_and_values=attributes_and_values)
 
 
 def get_attributes_for_span(
@@ -592,11 +595,8 @@ def get_github_enterprise_integration_config(
         logger.error("No access token found for integration %s", integration.id)
         return GitHubEnterpriseConfigErrorResponse()
 
-    try:
-        fernet = Fernet(settings.SEER_GHE_ENCRYPT_KEY.encode("utf-8"))
-        encrypted_access_token = fernet.encrypt(access_token.encode("utf-8")).decode("utf-8")
-    except Exception:
-        logger.exception("Failed to encrypt access token")
+    encrypted_access_token = encrypt_access_token_for_seer(access_token)
+    if not encrypted_access_token:
         return GitHubEnterpriseConfigErrorResponse()
 
     return GitHubEnterpriseConfigSuccessResponse(
@@ -900,12 +900,14 @@ def get_project_preferences(*, organization_id: int, project_id: int) -> SeerPro
 
 def bulk_get_project_preferences(
     *, organization_id: int, project_ids: list[int]
-) -> dict[str, dict]:
+) -> BulkProjectPreferencesResponse:
     """Bulk get Seer project preferences, keyed by stringified project ID.
 
     Projects not belonging to the given organization are silently skipped."""
     preferences = bulk_read_preferences_from_sentry_db(organization_id, project_ids)
-    return {str(project_id): pref.dict() for project_id, pref in preferences.items()}
+    return BulkProjectPreferencesResponse(
+        __root__={str(project_id): pref.dict() for project_id, pref in preferences.items()}
+    )
 
 
 def deliver_feature_result(
@@ -929,13 +931,49 @@ def deliver_feature_result(
     handler(organization_id, run_uuid, status, result, error)
 
 
+def refresh_monitoring_provider_token(*, identity_id: int) -> dict:
+    """Refresh the access token for a monitoring provider identity."""
+    if not settings.SEER_GHE_ENCRYPT_KEY:
+        logger.error("Cannot encrypt monitoring provider access token without SEER_GHE_ENCRYPT_KEY")
+        return {"error": "encryption_failed"}
+
+    identity = identity_service.get_identity(filter={"id": identity_id})
+    if identity is None:
+        return {"error": "identity_not_found"}
+
+    idp = identity_service.get_provider(provider_id=identity.idp_id)
+    if idp is None or idp.type not in MONITORING_PROVIDERS:
+        return {"error": "identity_not_found"}
+
+    try:
+        provider = identity_manager.get(idp.type)
+        provider.refresh_identity(identity)
+    except IdentityNotValid:
+        return {"error": "identity_not_valid"}
+    except (ApiError, KeyError, RequestException):
+        return {"error": "refresh_failed"}
+
+    access_token = identity.data.get("access_token")
+    if not access_token:
+        return {"error": "identity_not_valid"}
+
+    encrypted_access_token = encrypt_access_token_for_seer(access_token)
+    if not encrypted_access_token:
+        return {"error": "encryption_failed"}
+
+    return {
+        "encrypted_access_token": encrypted_access_token,
+        "expires": identity.data.get("expires"),
+    }
+
+
 def record_pr_attribution(
     *,
     organization_id: int,
     pull_request_id: int,
     signal_type: str,
     signal_details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> PrAttributionResponse:
     """Record a PR attribution signal on behalf of Seer.
 
     Idempotent via the unique constraint on
@@ -968,7 +1006,7 @@ def record_pr_attribution(
             "seer.record_pr_attribution.feature_disabled",
             extra={"organization_id": organization_id, "pull_request_id": pull_request_id},
         )
-        return {"attribution_id": None}
+        return PrAttributionResponse(attribution_id=None)
 
     try:
         pull_request = PullRequest.objects.get(
@@ -1003,7 +1041,7 @@ def record_pr_attribution(
             "attribution_id": attribution.id,
         },
     )
-    return {"attribution_id": attribution.id}
+    return PrAttributionResponse(attribution_id=attribution.id)
 
 
 seer_method_registry: dict[str, Callable] = {  # return type must be serialized
@@ -1079,6 +1117,9 @@ seer_method_registry: dict[str, Callable] = {  # return type must be serialized
     #
     # PR metrics (judge path)
     "update_pr_metrics": update_pr_metrics,
+    #
+    # Monitoring provider tokens (MCP)
+    "refresh_monitoring_provider_token": refresh_monitoring_provider_token,
 }
 
 
