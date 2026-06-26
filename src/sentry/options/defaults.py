@@ -2043,6 +2043,12 @@ register(
     0,
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
+# Toggles emitting the smallest-transaction sampling-factor bucket metric during transaction rebalancing.
+register(
+    "dynamic-sampling.boost_low_volume_transactions.emit_smallest_transaction_factor_metric",
+    default=False,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
 
 # Stops dynamic sampling rules from being emitted in relay config.
 # This is required for ST instances that have flakey flags as we want to be able kill DS ruining customer data if necessary.
@@ -3739,6 +3745,23 @@ register(
     "tasks.producer.profiles.rollout",
     type=Float,
     default=0.0,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+
+# Rolls out the new TaskProducer to track_outcome in tasks
+register(
+    "tasks.producer.track_outcome.rollout",
+    type=Float,
+    default=0.0,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+
+# If False, TaskWorkers will wait for a task's producer futures to complete
+# before marking a task as complete
+register(
+    "taskworker.skip.awaiting.futures",
+    type=Bool,
+    default=True,
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
 
