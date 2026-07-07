@@ -552,6 +552,14 @@ register(
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
 
+# Threshold for inlining attachments in relay.
+register(
+    "relay.attachment-inline.limit",
+    type=Int,
+    default=0,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+
 # Rollout rate for double writing sessions to EAP.
 register(
     "relay.sessions-eap.rollout-rate",
@@ -2981,6 +2989,12 @@ register(
 register(
     "spans.buffer.flusher.log-flushed-segments",
     default=False,
+    flags=FLAG_PRIORITIZE_DISK | FLAG_AUTOMATOR_MODIFIABLE,
+)
+register(
+    "spans.buffer.process-segments-task-rollout-rate",
+    type=Float,
+    default=0.0,
     flags=FLAG_PRIORITIZE_DISK | FLAG_AUTOMATOR_MODIFIABLE,
 )
 
