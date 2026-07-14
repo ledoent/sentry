@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
@@ -6,14 +7,14 @@ from sentry.seer.autofix.autofix_agent import (
     PrIterationNoPullRequestException,
 )
 from sentry.seer.autofix.constants import AutofixReferrer
-from sentry.seer.autofix.pr_iteration.feedback_queue import QueuedAutofixFeedback
-from sentry.seer.autofix.pr_iteration.types import (
-    Feedback,
+from sentry.seer.autofix.pr_iteration.feedback import Feedback, serialize_feedback
+from sentry.seer.autofix.pr_iteration.feedback_sources.base import ConsumeTask
+from sentry.seer.autofix.pr_iteration.feedback_sources.github_comment import (
     GithubPrCommentFeedbackSource,
     GithubPrReviewCommentFeedbackSource,
-    UserUIFeedbackSource,
-    serialize_feedback,
 )
+from sentry.seer.autofix.pr_iteration.feedback_sources.user_ui import UserUIFeedbackSource
+from sentry.seer.autofix.pr_iteration.queue import QueuedAutofixFeedback
 from sentry.seer.models import SeerApiError
 from sentry.tasks.seer.pr_iteration import (
     consume_queued_autofix_feedback,
@@ -229,14 +230,21 @@ class ConsumeQueuedAutofixFeedbackTest(TestCase):
             referrer=AutofixReferrer.GITHUB_PR_COMMENT,
         )
 
-    def _review_feedback(self, comment_id: int) -> Feedback:
+    def _review_feedback(
+        self,
+        comment_id: int,
+        *,
+        line: int | None = 42,
+        start_line: int | None = None,
+    ) -> Feedback:
         return Feedback(
             source=GithubPrReviewCommentFeedbackSource(
                 comment={
                     "id": comment_id,
                     "body": "@sentry fix it",
                     "path": "src/sentry/foo.py",
-                    "line": 42,
+                    "line": line,
+                    "start_line": start_line,
                 },
             )
         )
@@ -444,6 +452,74 @@ class ConsumeQueuedAutofixFeedbackTest(TestCase):
 
         self._call()
 
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_review_comment_range_anchor_in_user_context(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = self._state()
+        mock_pop.return_value = [self._queued(self._review_feedback(888, line=42, start_line=40))]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        assert (
+            mock_trigger.call_args.kwargs["user_context"]
+            == "Inline comment on src/sentry/foo.py:40-42:\nfix it"
+        )
+
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_review_comment_single_line_anchor_in_user_context(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = self._state()
+        mock_pop.return_value = [self._queued(self._review_feedback(999, line=42))]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        assert (
+            mock_trigger.call_args.kwargs["user_context"]
+            == "Inline comment on src/sentry/foo.py:42:\nfix it"
+        )
+
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_non_review_feedback_text_passed_through(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = self._state()
+        mock_pop.return_value = [
+            self._queued(
+                Feedback(
+                    source=GithubPrCommentFeedbackSource(
+                        comment={"id": 1001, "body": "@sentry top level"}
+                    )
+                )
+            ),
+            self._queued(
+                Feedback(source=UserUIFeedbackSource(user_id=1, user_feedback="ui feedback"))
+            ),
+        ]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        assert mock_trigger.call_args.kwargs["user_context"] == "top level\n\nui feedback"
+
 
 class TriggerConsumePrIterationFeedbackTest(TestCase):
     def _feedback(self) -> Feedback:
@@ -472,9 +548,9 @@ class TriggerConsumePrIterationFeedbackTest(TestCase):
         )
 
     @patch(f"{TASK_PATH}.consume_queued_autofix_feedback.apply_async")
-    def test_skips_when_should_trigger_false(self, mock_apply: MagicMock) -> None:
+    def test_skips_when_no_consume_task(self, mock_apply: MagicMock) -> None:
         feedback = self._feedback()
-        with patch.object(type(feedback.source), "should_trigger", return_value=False):
+        with patch.object(type(feedback.source), "should_trigger", return_value=None):
             trigger_consume_pr_iteration_feedback(
                 run_id=67890,
                 organization_id=self.organization.id,
@@ -485,9 +561,29 @@ class TriggerConsumePrIterationFeedbackTest(TestCase):
         mock_apply.assert_not_called()
 
     @patch(f"{TASK_PATH}.consume_queued_autofix_feedback.apply_async")
+    def test_queues_later_task_with_countdown(self, mock_apply: MagicMock) -> None:
+        feedback = self._feedback()
+        with patch.object(
+            type(feedback.source),
+            "should_trigger",
+            return_value=ConsumeTask.Later(timedelta(hours=1)),
+        ):
+            trigger_consume_pr_iteration_feedback(
+                run_id=67890,
+                organization_id=self.organization.id,
+                feedback=feedback,
+                run_state=self._state(),
+            )
+
+        mock_apply.assert_called_once_with(
+            kwargs={"run_id": 67890, "organization_id": self.organization.id},
+            countdown=3600,
+        )
+
+    @patch(f"{TASK_PATH}.consume_queued_autofix_feedback.apply_async")
     def test_bypass_ignores_should_trigger(self, mock_apply: MagicMock) -> None:
         feedback = self._feedback()
-        with patch.object(type(feedback.source), "should_trigger", return_value=False):
+        with patch.object(type(feedback.source), "should_trigger", return_value=None):
             trigger_consume_pr_iteration_feedback(
                 run_id=67890,
                 organization_id=self.organization.id,
