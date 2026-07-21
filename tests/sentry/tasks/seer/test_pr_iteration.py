@@ -9,6 +9,10 @@ from sentry.seer.autofix.autofix_agent import (
 from sentry.seer.autofix.constants import AutofixReferrer
 from sentry.seer.autofix.pr_iteration.feedback import Feedback, serialize_feedback
 from sentry.seer.autofix.pr_iteration.feedback_sources.base import ConsumeTask
+from sentry.seer.autofix.pr_iteration.feedback_sources.check_suite import (
+    CheckSuiteAutofixRun,
+    CheckSuiteFeedbackSource,
+)
 from sentry.seer.autofix.pr_iteration.feedback_sources.github_comment import (
     GithubPrCommentFeedbackSource,
     GithubPrReviewCommentFeedbackSource,
@@ -25,6 +29,7 @@ from sentry.tasks.seer.pr_iteration import (
 from sentry.testutils.cases import TestCase
 
 TASK_PATH = "sentry.tasks.seer.pr_iteration"
+CHECK_SUITE_SOURCE_PATH = "sentry.seer.autofix.pr_iteration.feedback_sources.check_suite"
 
 
 class TriggerPrIterationFromCommentTest(TestCase):
@@ -169,9 +174,55 @@ class TriggerPrIterationFromCommentTest(TestCase):
         mock_make_scm: MagicMock,
         mock_reaction: MagicMock,
     ) -> None:
+        # Missing runs must no-op: webhooks fan out to every region, so the
+        # region that doesn't own the Autofix session must not react/comment
+        # as if the PR were ineligible.
         mock_integration = self._mock_integration()
         mock_get_integration.return_value = mock_integration
         mock_get_state.return_value = None
+
+        self._call()
+
+        mock_has_access.assert_not_called()
+        mock_enqueue.assert_not_called()
+        mock_trigger_consume.assert_not_called()
+        mock_reaction.assert_not_called()
+        mock_make_scm.assert_not_called()
+        mock_integration.get_installation.return_value.get_client.return_value.create_comment.assert_not_called()
+        mock_cache.get.assert_not_called()
+        mock_cache.set.assert_not_called()
+
+    @patch(f"{TASK_PATH}._add_comment_reaction")
+    @patch(f"{TASK_PATH}.make_scm")
+    @patch(f"{TASK_PATH}.default_cache")
+    @patch(f"{TASK_PATH}._github_commenter_has_repo_write_access")
+    @patch(f"{TASK_PATH}.trigger_consume_pr_iteration_feedback")
+    @patch(f"{TASK_PATH}.try_enqueue_autofix_feedback", return_value=True)
+    @patch(f"{TASK_PATH}.get_agent_state_from_pr_id")
+    @patch(f"{TASK_PATH}.integration_service.get_integration")
+    def test_comments_ineligible_when_run_has_no_repo_pr_states(
+        self,
+        mock_get_integration: MagicMock,
+        mock_get_state: MagicMock,
+        mock_enqueue: MagicMock,
+        mock_trigger_consume: MagicMock,
+        mock_has_access: MagicMock,
+        mock_cache: MagicMock,
+        mock_make_scm: MagicMock,
+        mock_reaction: MagicMock,
+    ) -> None:
+        # Found a Seer run (e.g. coding-agent handoff) but no Autofix PRs —
+        # this is the case where we still explain ineligibility.
+        mock_integration = self._mock_integration()
+        mock_get_integration.return_value = mock_integration
+        mock_get_state.return_value = SeerRunState(
+            run_id=67890,
+            blocks=[],
+            status="completed",
+            updated_at="2024-01-01T00:00:00Z",
+            repo_pr_states={},
+            metadata={"group_id": self.group.id},
+        )
         mock_cache.get.return_value = None
 
         self._call()
@@ -214,7 +265,14 @@ class TriggerPrIterationFromCommentTest(TestCase):
     ) -> None:
         mock_integration = self._mock_integration()
         mock_get_integration.return_value = mock_integration
-        mock_get_state.return_value = None
+        mock_get_state.return_value = SeerRunState(
+            run_id=67890,
+            blocks=[],
+            status="completed",
+            updated_at="2024-01-01T00:00:00Z",
+            repo_pr_states={},
+            metadata={"group_id": self.group.id},
+        )
         mock_cache.get.return_value = True
 
         self._call()
@@ -310,6 +368,41 @@ class ConsumeQueuedAutofixFeedbackTest(TestCase):
                 },
             )
         )
+
+    def _check_suite_feedback(self, *, updated_at: str | None = "2024-01-01T00:00:00Z") -> Feedback:
+        check_suite: dict[str, Any] = {
+            "id": 1,
+            "head_sha": "abc",
+            "check_runs_url": "https://github.com/owner/repo/check-runs",
+            "app": {"name": "CI"},
+        }
+        if updated_at is not None:
+            check_suite["updated_at"] = updated_at
+        event = {
+            "check_suite": check_suite,
+            "repository": {
+                "html_url": "https://github.com/owner/repo",
+                "full_name": "owner/repo",
+            },
+        }
+        source = CheckSuiteFeedbackSource(event=event)
+        autofix_run = CheckSuiteAutofixRun(
+            repository=MagicMock(organization_id=self.organization.id, id=2),
+            run_state=self._state(),
+            pr_id=99,
+            group_id=self.group.id,
+        )
+        with patch(
+            "sentry.seer.autofix.pr_iteration.feedback_sources.check_suite.resolve_check_suite_autofix_run",
+            return_value=autofix_run,
+        ):
+            assert source.autofix_run is autofix_run
+        return Feedback(source=source)
+
+    def _state_on_head(self, **kwargs: Any) -> SeerRunState:
+        state = self._state(**kwargs)
+        state.repo_pr_states = {"owner/repo": RepoPRState(repo_name="owner/repo", commit_sha="abc")}
+        return state
 
     def _call(self) -> None:
         consume_queued_autofix_feedback(run_id=67890, organization_id=self.organization.id)
@@ -468,6 +561,72 @@ class ConsumeQueuedAutofixFeedbackTest(TestCase):
         mock_pop.return_value = [
             self._queued(self._review_feedback(666)),
             self._queued(self._review_feedback(666)),
+        ]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        assert len(mock_trigger.call_args.kwargs["feedback"]) == 1
+
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_keeps_same_suite_different_updated_at_in_batch(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        """Re-run in the same drain batch must not be dropped by suite-id coalesce."""
+        mock_fetch.return_value = self._state_on_head()
+        mock_pop.return_value = [
+            self._queued(self._check_suite_feedback(updated_at="2024-01-01T00:00:00Z")),
+            self._queued(self._check_suite_feedback(updated_at="2024-01-02T00:00:00Z")),
+        ]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        feedback = mock_trigger.call_args.kwargs["feedback"]
+        assert len(feedback) == 2
+        assert [f.source.event.check_suite.updated_at for f in feedback] == [
+            "2024-01-01T00:00:00Z",
+            "2024-01-02T00:00:00Z",
+        ]
+
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_collapses_duplicate_attempt_key_in_batch(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = self._state_on_head()
+        mock_pop.return_value = [
+            self._queued(self._check_suite_feedback(updated_at="2024-01-01T00:00:00Z")),
+            self._queued(self._check_suite_feedback(updated_at="2024-01-01T00:00:00Z")),
+        ]
+
+        self._call()
+
+        mock_trigger.assert_called_once()
+        assert len(mock_trigger.call_args.kwargs["feedback"]) == 1
+
+    @patch(f"{TASK_PATH}.trigger_autofix_agent")
+    @patch(f"{TASK_PATH}.pop_queued_autofix_feedback")
+    @patch(f"{TASK_PATH}.fetch_run_status")
+    def test_collapses_legacy_missing_updated_at_by_suite_id(
+        self,
+        mock_fetch: MagicMock,
+        mock_pop: MagicMock,
+        mock_trigger: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = self._state_on_head()
+        mock_pop.return_value = [
+            self._queued(self._check_suite_feedback(updated_at=None)),
+            self._queued(self._check_suite_feedback(updated_at=None)),
         ]
 
         self._call()
