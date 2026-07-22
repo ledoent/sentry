@@ -5,6 +5,12 @@ import pytest
 from pydantic import ValidationError
 
 from sentry.seer.agent.client_models import MemoryBlock, Message, RepoPRState, SeerRunState
+from sentry.seer.autofix.pr_iteration.check_suites import (
+    CheckSuiteAutofixRun,
+    GithubCheckSuiteEvent,
+    get_check_suite_url,
+    resolve_check_suite_repositories,
+)
 from sentry.seer.autofix.pr_iteration.feedback import (
     Feedback,
     parse_feedback,
@@ -12,16 +18,13 @@ from sentry.seer.autofix.pr_iteration.feedback import (
 )
 from sentry.seer.autofix.pr_iteration.feedback_sources.base import ConsumeTask
 from sentry.seer.autofix.pr_iteration.feedback_sources.check_suite import (
-    CheckSuiteAutofixRun,
     CheckSuiteFeedbackSource,
-    GithubCheckSuiteEvent,
     MissingCheckSuiteAutofixRun,
-    get_check_suite_url,
-    resolve_check_suite_repositories,
 )
 from sentry.seer.autofix.pr_iteration.feedback_sources.github_comment import (
     GithubIssueComment,
     GithubPrCommentFeedbackSource,
+    GithubPrReviewBodyFeedbackSource,
     GithubPrReviewCommentFeedbackSource,
 )
 from sentry.seer.autofix.pr_iteration.feedback_sources.user_ui import UserUIFeedbackSource
@@ -29,6 +32,7 @@ from sentry.testutils.cases import TestCase
 from sentry.utils import json
 
 CHECK_SUITE_SOURCE_PATH = "sentry.seer.autofix.pr_iteration.feedback_sources.check_suite"
+CHECK_SUITES_PATH = "sentry.seer.autofix.pr_iteration.check_suites"
 
 
 def _check_suite_event(*, updated_at: str | None = "2024-01-01T00:00:00Z") -> dict:
@@ -92,15 +96,17 @@ def _review_feedback(
     file_path: str | None = "src/sentry/foo.py",
     line: int | None = 42,
     start_line: int | None = None,
+    diff_hunk: str | None = None,
 ) -> Feedback:
     return Feedback(
         source=GithubPrReviewCommentFeedbackSource(
             comment={
                 "id": 1,
-                "body": "@sentry fix it",
+                "body": "fix it",
                 "path": file_path,
                 "line": line,
                 "start_line": start_line,
+                "diff_hunk": diff_hunk,
             },
         ),
     )
@@ -417,10 +423,96 @@ class GithubPrReviewCommentTextTest(TestCase):
         assert feedback.text == "Inline comment on src/sentry/foo.py:\nfix it"
         assert feedback.ui_text == "fix it"
 
+    def test_text_falls_back_to_diff_hunk_when_no_line(self) -> None:
+        # GitHub's legacy review-comment listing returns position/diff_hunk but no
+        # resolved line; use the hunk so the agent still sees the exact code.
+        hunk = "@@ -19,5 +19,5 @@\n-    old line\n+    new line"
+        feedback = _review_feedback(line=None, start_line=None, diff_hunk=hunk)
+        assert feedback.text == f"Inline comment on src/sentry/foo.py at diff hunk:\n{hunk}\nfix it"
+        assert feedback.ui_text == "fix it"
+
+    def test_text_prefers_line_anchor_over_diff_hunk(self) -> None:
+        feedback = _review_feedback(line=42, diff_hunk="@@ -1 +1 @@")
+        assert feedback.text == "Inline comment on src/sentry/foo.py:42:\nfix it"
+        assert feedback.ui_text == "fix it"
+
     def test_text_no_file_path_passes_through(self) -> None:
         feedback = _review_feedback(file_path=None, line=None)
         assert feedback.text == "fix it"
         assert feedback.ui_text == "fix it"
+
+    def test_text_line_without_file_path_passes_through(self) -> None:
+        # A line without a file_path can't be anchored (anchor() -> None), so it
+        # must not render "Inline comment on None:"; fall through to plain text.
+        feedback = _review_feedback(file_path=None, line=42)
+        assert feedback.text == "fix it"
+        assert feedback.ui_text == "fix it"
+
+    def test_text_line_without_file_path_falls_back_to_diff_hunk(self) -> None:
+        # Same, but a diff hunk is present: use it rather than the bogus anchor.
+        hunk = "@@ -1 +1 @@"
+        feedback = _review_feedback(file_path=None, line=42, diff_hunk=hunk)
+        assert feedback.text == "fix it"
+        assert feedback.ui_text == "fix it"
+
+
+class GithubPrReviewCommentRequireCommandTest(TestCase):
+    def test_require_command_is_false_on_class(self) -> None:
+        # ``require_command`` is a per-subclass contract, not a per-instance flag:
+        # review comments never gate on the @sentry command.
+        assert GithubPrReviewCommentFeedbackSource.require_command is False
+        assert GithubPrCommentFeedbackSource.require_command is True
+
+    def test_verbatim_body_without_command(self) -> None:
+        # The review path opts out of the @sentry command gate, so the raw body
+        # is used verbatim even without a command.
+        source = GithubPrReviewCommentFeedbackSource(
+            comment={"id": 1, "body": "please rename this", "path": "a.py", "line": 5},
+        )
+        assert source.comment_feedback == "please rename this"
+        assert source.text == "Inline comment on a.py:5:\nplease rename this"
+
+    def test_round_trips(self) -> None:
+        source = GithubPrReviewCommentFeedbackSource(
+            comment={"id": 1, "body": "no command", "path": "a.py", "line": 5},
+        )
+        parsed = parse_feedback(Feedback(source=source).json())
+        assert isinstance(parsed[0].source, GithubPrReviewCommentFeedbackSource)
+        assert parsed[0].source.require_command is False
+        assert parsed[0].text == "Inline comment on a.py:5:\nno command"
+
+
+class GithubPrReviewBodyTest(TestCase):
+    def test_text_is_body(self) -> None:
+        source = GithubPrReviewBodyFeedbackSource(review_id=5, body="overall summary")
+        assert source.text == "overall summary"
+        assert Feedback(source=source).text == "overall summary"
+
+    def test_round_trips(self) -> None:
+        source = GithubPrReviewBodyFeedbackSource(
+            review_id=5, body="overall summary", html_url="https://x/5"
+        )
+        parsed = parse_feedback(Feedback(source=source).json())
+        assert isinstance(parsed[0].source, GithubPrReviewBodyFeedbackSource)
+        assert parsed[0].source.review_id == 5
+        assert parsed[0].source.body == "overall summary"
+        assert parsed[0].source.html_url == "https://x/5"
+
+    def test_should_consume_false_when_review_already_processed(self) -> None:
+        processed = Feedback(source=GithubPrReviewBodyFeedbackSource(review_id=5, body="a"))
+        state = _run_state(blocks=[_feedback_block(processed)])
+        source = GithubPrReviewBodyFeedbackSource(review_id=5, body="a")
+        assert source.should_consume(state) is False
+
+    def test_should_consume_true_when_review_unseen(self) -> None:
+        processed = Feedback(source=GithubPrReviewBodyFeedbackSource(review_id=5, body="a"))
+        state = _run_state(blocks=[_feedback_block(processed)])
+        source = GithubPrReviewBodyFeedbackSource(review_id=6, body="b")
+        assert source.should_consume(state) is True
+
+    def test_should_consume_true_when_review_id_missing(self) -> None:
+        source = GithubPrReviewBodyFeedbackSource(body="a")
+        assert source.should_consume(_run_state()) is True
 
 
 class ConsumeTaskTest(TestCase):
@@ -616,15 +708,15 @@ class CheckSuiteShouldTriggerTest(TestCase):
     def test_now_when_scm_init_fails(self, _mock_new: MagicMock) -> None:
         assert self._source().should_trigger(_run_state()) == ConsumeTask.Now
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.ListCheckRunsForRefProtocol", type("Other", (), {}))
+    @patch(f"{CHECK_SUITES_PATH}.ListCheckRunsForRefProtocol", type("Other", (), {}))
     @patch("sentry.scm.factory.new")
     def test_now_when_unsupported_provider(self, mock_new: MagicMock) -> None:
         mock_new.return_value = MagicMock()
 
         assert self._source().should_trigger(_run_state()) == ConsumeTask.Now
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.iter_all_pages")
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.ListCheckRunsForRefProtocol", object)
+    @patch(f"{CHECK_SUITES_PATH}.iter_all_pages")
+    @patch(f"{CHECK_SUITES_PATH}.ListCheckRunsForRefProtocol", object)
     @patch("sentry.scm.factory.new")
     def test_later_when_a_check_suite_not_completed(
         self,
@@ -636,8 +728,8 @@ class CheckSuiteShouldTriggerTest(TestCase):
 
         assert self._source().should_trigger(_run_state()) == ConsumeTask.Later(timedelta(hours=1))
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.iter_all_pages")
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.ListCheckRunsForRefProtocol", object)
+    @patch(f"{CHECK_SUITES_PATH}.iter_all_pages")
+    @patch(f"{CHECK_SUITES_PATH}.ListCheckRunsForRefProtocol", object)
     @patch("sentry.scm.factory.new")
     def test_now_when_all_completed(
         self,
@@ -649,8 +741,8 @@ class CheckSuiteShouldTriggerTest(TestCase):
 
         assert self._source().should_trigger(_run_state()) == ConsumeTask.Now
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.iter_all_pages", side_effect=Exception("boom"))
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.ListCheckRunsForRefProtocol", object)
+    @patch(f"{CHECK_SUITES_PATH}.iter_all_pages", side_effect=Exception("boom"))
+    @patch(f"{CHECK_SUITES_PATH}.ListCheckRunsForRefProtocol", object)
     @patch("sentry.scm.factory.new")
     def test_now_when_list_check_suites_fails(
         self,
@@ -675,7 +767,7 @@ class ResolveCheckSuiteRepositoriesTest(TestCase):
             == []
         )
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.integration_service.organization_contexts")
+    @patch(f"{CHECK_SUITES_PATH}.integration_service.organization_contexts")
     def test_empty_when_no_integration(self, mock_contexts: MagicMock) -> None:
         mock_contexts.return_value = MagicMock(integration=None, organization_integrations=[])
 
@@ -691,7 +783,7 @@ class ResolveCheckSuiteRepositoriesTest(TestCase):
 
         assert result == []
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.integration_service.organization_contexts")
+    @patch(f"{CHECK_SUITES_PATH}.integration_service.organization_contexts")
     def test_returns_matching_repos(self, mock_contexts: MagicMock) -> None:
         repo = self.create_repo(
             project=self.project,
@@ -716,7 +808,7 @@ class ResolveCheckSuiteRepositoriesTest(TestCase):
 
         assert [r.id for r in result] == [repo.id]
 
-    @patch(f"{CHECK_SUITE_SOURCE_PATH}.integration_service.organization_contexts")
+    @patch(f"{CHECK_SUITES_PATH}.integration_service.organization_contexts")
     def test_returns_all_matching_repos_across_orgs(self, mock_contexts: MagicMock) -> None:
         other_org = self.create_organization()
         other_project = self.create_project(organization=other_org)
