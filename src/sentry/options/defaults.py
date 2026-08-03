@@ -1462,6 +1462,9 @@ register("relay.allow_internal_ip_auth", default=True, flags=FLAG_AUTOMATOR_MODI
 # Example value: [{"project_id": 42}, {"project_id": 123}]
 register("relay.drop-transaction-metrics", default=[], flags=FLAG_AUTOMATOR_MODIFIABLE)
 
+# Tell Relay to stop extracting metrics from transaction payloads for all projects.
+register("relay.drop-transaction-metrics2", default=False, flags=FLAG_AUTOMATOR_MODIFIABLE)
+
 # Relay should emit a usage metric to track total spans.
 register("relay.span-usage-metric", default=False, flags=FLAG_AUTOMATOR_MODIFIABLE)
 
@@ -2242,17 +2245,6 @@ register(
     "dynamic-sampling.prioritise_transactions.min_sample_rate",
     default=0.0,
     flags=FLAG_MODIFIABLE_RATE | FLAG_AUTOMATOR_MODIFIABLE,
-)
-
-# Applies the implicit sample rate floor in the per-org pipeline. The transaction rebalancing
-# model can return an implicit (tail) rate below the project's overall rate; the floor lifts it
-# back to that rate and pays for it by lowering the explicit rates. The legacy pipeline has no
-# such step, so with this enabled the two pipelines write different per-transaction rates for
-# identical input. Set to False to compare them like for like.
-register(
-    "dynamic-sampling.per_org.apply-implicit-sample-rate-floor",
-    default=True,
-    flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
 
 # Stops dynamic sampling rules from being emitted in relay config.
