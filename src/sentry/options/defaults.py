@@ -1338,6 +1338,26 @@ register(
     default=1,
     flags=FLAG_AUTOMATOR_MODIFIABLE,
 )
+register(
+    "issues.backfill_pr_lifecycle_state.killswitch",
+    type=Bool,
+    default=False,
+    flags=FLAG_MODIFIABLE_BOOL | FLAG_AUTOMATOR_MODIFIABLE,
+)
+# Minimum seconds between provider requests, so the backfill leaves headroom for live
+# traffic on the same installation.
+register(
+    "issues.backfill_pr_lifecycle_state.api_interval_s",
+    type=Float,
+    default=0.1,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+register(
+    "issues.backfill_pr_lifecycle_state.rate_limited_backoff_s",
+    type=Float,
+    default=5.0,
+    flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
 
 register(
     "seer.supergroups_backfill_lightweight.killswitch",
@@ -2266,6 +2286,17 @@ register(
 # subset so toggling the rate up and down does not reshuffle which orgs run.
 register(
     "dynamic-sampling.per_org.rollout-rate",
+    type=Float,
+    default=0.0,
+    flags=FLAG_MODIFIABLE_RATE | FLAG_AUTOMATOR_MODIFIABLE,
+)
+
+# Deterministic % rollout of the recalibration step within the per-org pipeline,
+# keyed on organization id. Recalibration writes the factor that serving applies,
+# so it rolls out separately from the rest of the pipeline. An org must be in both
+# this group and dynamic-sampling.per_org.rollout-rate for its factor to be updated.
+register(
+    "dynamic-sampling.per_org.recalibration-rollout-rate",
     type=Float,
     default=0.0,
     flags=FLAG_MODIFIABLE_RATE | FLAG_AUTOMATOR_MODIFIABLE,
@@ -4074,4 +4105,12 @@ register(
     default=True,
     type=Bool,
     flags=FLAG_AUTOMATOR_MODIFIABLE,
+)
+
+# Kill switch for Objectstore Debug Files migration
+register(
+    "debug-files.objectstore-migration.enabled",
+    default=True,
+    type=Bool,
+    flags=FLAG_MODIFIABLE_BOOL | FLAG_AUTOMATOR_MODIFIABLE,
 )
