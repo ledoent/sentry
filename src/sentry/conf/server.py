@@ -1015,6 +1015,7 @@ TASKWORKER_IMPORTS: tuple[str, ...] = (
     "sentry.tasks.seer.explorer_index",
     "sentry.tasks.seer.context_engine_index",
     "sentry.tasks.seer.lightweight_rca_cluster",
+    "sentry.tasks.seer.investigation",
     "sentry.tasks.seer.night_shift.cron",
     "sentry.tasks.seer.backfill_supergroups_lightweight",
     # Used for tests
@@ -1237,7 +1238,7 @@ TASKWORKER_REGION_SCHEDULES: ScheduleConfigMap = {
     },
     "heal-stale-derived-data": {
         "task": "issues:sentry.issues.derived.tasks.heal_stale_derived_data",
-        "schedule": crontab("*/15", "*", "*", "*", "*"),
+        "schedule": crontab("*/10", "*", "*", "*", "*"),
     },
 }
 
