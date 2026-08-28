@@ -204,6 +204,7 @@ export function SeerExplorerContent({
     hasSentInterrupt,
     overrideCtxEngEnable,
     setOverrideCtxEngEnable,
+    overrideBashModeEnabled,
     setOverrideBashModeEnabled,
     setOverrideCodeModeEnable,
   } = useSeerExplorer();
@@ -321,7 +322,9 @@ export function SeerExplorerContent({
   });
 
   const showReauth =
-    isReauthPending && !!organization?.features.includes('seer-infra-telemetry');
+    isReauthPending &&
+    !!organization?.features.includes('seer-infra-telemetry') &&
+    !!organization?.features.includes('seer-infra-telemetry-user-level-auth');
 
   // - Topbar, menu, and slash command handlers -------------------------------
   const copySessionEnabled = runId !== null && !!organization?.slug;
@@ -558,6 +561,8 @@ export function SeerExplorerContent({
       onCopyLinkClick={runId === null ? undefined : handleCopyLink}
       overrideCtxEngEnable={overrideCtxEngEnable}
       onOverrideCtxEngEnableToggle={() => setOverrideCtxEngEnable(v => !v)}
+      overrideBashModeEnabled={overrideBashModeEnabled}
+      onOverrideBashModeToggle={() => setOverrideBashModeEnabled(v => !v)}
       showThinking={showThinking}
       onShowThinkingToggle={() => setShowThinking(v => !v)}
       isPipSupported={isPipSupported}
