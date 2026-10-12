@@ -12,14 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
 from django.conf import settings
+from sentry_sdk import traces
 
-from sentry import options
 from sentry.options.rollout import in_random_rollout
 from sentry.users.services.user.model import RpcUser
 from sentry.utils import metrics
 from sentry.utils.flag import record_feature_flag
-from sentry.utils.tracing import set_span_data, start_span
-from sentry.utils.types import Dict
 
 from .base import Feature, FeatureHandlerStrategy, ProjectFeature
 from .exceptions import FeatureNotRegistered
@@ -182,14 +180,14 @@ class RegisteredFeatureManager:
                 if not unresolved_projects:
                     break
 
-                with start_span(
-                    op="feature.has_for_batch.handler",
+                with traces.start_span(
                     name=f"{type(handler).__name__} ({feature_name})",
+                    attributes={"sentry.op": "feature.has_for_batch.handler"},
                 ) as span:
                     batch_size = len(unresolved_projects)
-                    set_span_data(span, "Batch Size", batch_size)
-                    set_span_data(span, "Feature Name", feature_name)
-                    set_span_data(span, "Handler Type", type(handler).__name__)
+                    span.set_attribute("Batch Size", batch_size)
+                    span.set_attribute("Feature Name", feature_name)
+                    span.set_attribute("Handler Type", type(handler).__name__)
 
                     batch = FeatureCheckBatch(
                         self, feature_name, organization, unresolved_projects, actor
@@ -199,7 +197,7 @@ class RegisteredFeatureManager:
                         if value is not None:
                             unresolved_projects.remove(project)
                             decisions[project] = value
-                    set_span_data(span, "Flags Found", batch_size - len(unresolved_projects))
+                    span.set_attribute("Flags Found", batch_size - len(unresolved_projects))
         except Exception as e:
             if in_random_rollout("features.error.capture_rate"):
                 sentry_sdk.capture_exception(e)
@@ -208,16 +206,11 @@ class RegisteredFeatureManager:
         return _ProjectHandlerEvaluation(decisions, unresolved_projects, failed=False)
 
 
-FLAGPOLE_OPTION_PREFIX = "feature"
-
-
 # TODO: Change RegisteredFeatureManager back to object once it can be removed
 class FeatureManager(RegisteredFeatureManager):
     def __init__(self) -> None:
         super().__init__()
         self._feature_registry: dict[str, type[Feature]] = {}
-        # Deprecated: Remove entity_features once flagr has been removed.
-        self.entity_features: set[str] = set()
         self.exposed_features: set[str] = set()
         self.flagpole_features: set[str] = set()
 
@@ -253,28 +246,13 @@ class FeatureManager(RegisteredFeatureManager):
         to encapsulate the context associated with a feature.
 
         >>> FeatureManager.has('my:feature', actor=request.user)
-
-        Features that use flagpole will have an option automatically registered.
         """
         entity_feature_strategy = self._shim_feature_strategy(entity_feature_strategy)
 
         if entity_feature_strategy == FeatureHandlerStrategy.FLAGPOLE:
             if name.startswith("users:"):
                 raise NotImplementedError("User flags not allowed with entity_feature=True")
-            self.entity_features.add(name)
-
-        # Register all flagpole features with options automator,
-        # so long as they haven't already been registered.
-        if (
-            entity_feature_strategy == FeatureHandlerStrategy.FLAGPOLE
-            and name not in self.flagpole_features
-        ):
             self.flagpole_features.add(name)
-            # Set a default of {} to ensure the feature evaluates to None when checked
-            feature_option_name = f"{FLAGPOLE_OPTION_PREFIX}.{name}"
-            options.register(
-                feature_option_name, type=Dict, default={}, flags=options.FLAG_AUTOMATOR_MODIFIABLE
-            )
 
         if name not in settings.SENTRY_FEATURES:
             settings.SENTRY_FEATURES[name] = default

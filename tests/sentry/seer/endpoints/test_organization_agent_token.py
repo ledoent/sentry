@@ -287,6 +287,10 @@ USER_GLOBAL_GET_ENDPOINTS = (
 OUTER_BOUNDARY_GET_STATUSES = {
     "OrganizationSCIMMemberDetails": 403,
     "OrganizationSCIMMemberIndex": 403,
+    "OrganizationSCIMResourceTypeDetails": 403,
+    "OrganizationSCIMResourceTypeIndex": 403,
+    "OrganizationSCIMSchemaDetails": 403,
+    "OrganizationSCIMServiceProviderConfig": 403,
     "OrganizationSCIMTeamDetails": 403,
     "OrganizationSCIMTeamIndex": 403,
 }
@@ -770,7 +774,7 @@ class OrganizationAgentTokenTest(APITestCase):
 @pytest.mark.sentry_metrics
 @pytest.mark.seer_agent_token_matrix
 @requires_snuba
-@override_settings(SEER_API_SHARED_SECRET=SECRET)
+@override_settings(SEER_API_SHARED_SECRET=SECRET, SENTRY_SELF_HOSTED=False)
 class AgentTokenPublicGetMatrixTest(APITestCase):
     """Differential, full-stack authentication coverage for the public API.
 
@@ -793,6 +797,11 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
 
     def setUp(self) -> None:
         super().setUp()
+        rate_limit_patcher = patch(
+            "sentry.middleware.ratelimit.get_rate_limit_value", return_value=None
+        )
+        rate_limit_patcher.start()
+        self.addCleanup(rate_limit_patcher.stop)
         self.owner = self.create_user()
         self.org = self.create_organization(owner=self.owner)
         self.team = self.create_team(organization=self.org)
@@ -1182,6 +1191,10 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
         if placeholder == "image_identifier":
             self._resource("preprod_snapshot")
             return "permission-matrix.png"
+        if placeholder == "resource_type_name":
+            return "User"
+        if placeholder == "schema_uri":
+            return "urn:ietf:params:scim:schemas:core:2.0:User"
 
         # These resources live in external storage or require a specialized service.
         # A well-formed nonexistent identifier still exercises authentication, endpoint
@@ -1214,6 +1227,13 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
                 "field": ["id", "project"],
                 "project": [self.project.id],
                 "statsPeriod": "1h",
+            }
+        if endpoint.endpoint_name == "OrganizationEventsDroppedEndpoint":
+            return {
+                "dataset": "spans",
+                "project": [self.project.id],
+                "statsPeriod": "1h",
+                "interval": "1h",
             }
         if endpoint.endpoint_name == "OrganizationPreprodLatestBaseSnapshotEndpoint":
             self._resource("preprod_snapshot")
@@ -1251,6 +1271,12 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
             if endpoint.endpoint_name == "OrganizationStatsEndpointV2":
                 params["category"] = "error"
             return params
+        if (
+            endpoint.endpoint_name == "OrganizationStarredServiceSpansEndpoint"
+            and isinstance(endpoint, PublicMutationEndpoint)
+            and endpoint.method == "DELETE"
+        ):
+            return {"service_span": "permission-matrix-span", "project_id": self.project.id}
         if endpoint.endpoint_name == "OrganizationTraceItemAttributesEndpoint":
             return {"dataset": "spans", "project": [self.project.id]}
         if endpoint.endpoint_name == "OrganizationTraceItemStatsEndpoint":
@@ -1303,12 +1329,12 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
             "ExternalUserDetailsEndpoint": "organizations:integrations-codeowners",
             "ExternalUserEndpoint": "organizations:integrations-codeowners",
             "EventAttachmentDetailsEndpoint": "organizations:event-attachments",
-            "GroupAutofixEndpoint": "organizations:gen-ai-features",
             "GroupIntegrationDetailsEndpoint": "organizations:integrations-issue-basic",
             "OrganizationEventsEndpoint": "organizations:discover-basic",
             "OrganizationGroupSearchViewsEndpoint": "organizations:issue-views",
             "OrganizationProfilingChunksEndpoint": "organizations:continuous-profiling",
             "OrganizationProfilingFlamegraphEndpoint": "organizations:profiling",
+            "OrganizationStarredServiceSpansEndpoint": "organizations:insights-modules-use-eap",
             "OrganizationTraceItemAttributesEndpoint": "organizations:visibility-explore-view",
             "OrganizationTraceItemMetricsEndpoint": "organizations:visibility-explore-view",
             "ProjectProfilingProfileEndpoint": "organizations:profiling",
@@ -1595,6 +1621,10 @@ class AgentTokenPublicGetMatrixTest(APITestCase):
                 "timeFilters": {"period": "14d"},
             },
             ("OrganizationReleaseFileDetailsEndpoint", "PUT"): {"name": "updated-matrix.js"},
+            ("OrganizationStarredServiceSpansEndpoint", "POST"): {
+                "service_span": "permission-matrix-span",
+                "project_id": self.project.id,
+            },
             ("ProjectReleaseFileDetailsEndpoint", "PUT"): {"name": "updated-matrix.js"},
             ("ProjectReleaseFilesEndpoint", "POST"): {
                 "name": "https://example.com/permission-matrix.js"

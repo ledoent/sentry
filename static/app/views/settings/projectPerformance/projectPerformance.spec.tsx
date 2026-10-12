@@ -85,11 +85,7 @@ function getDetectorSlider({label, index}: {index: number; label: string}) {
 
 describe('projectPerformance', () => {
   const org = OrganizationFixture({
-    features: [
-      'performance-view',
-      'performance-web-vitals-seer-suggestions',
-      'gen-ai-features',
-    ],
+    features: ['performance-view', 'performance-web-vitals-seer-suggestions'],
   });
   const project = ProjectFixture();
   const configUrl = '/projects/org-slug/project-slug/transaction-threshold/configure/';
@@ -181,6 +177,21 @@ describe('projectPerformance', () => {
     ).toHaveValue('300');
 
     expect(getMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides threshold settings for EAP organizations', async () => {
+    render(<ProjectPerformance />, {
+      initialRouterConfig,
+      organization: OrganizationFixture({
+        features: [...org.features, 'insights-modules-use-eap'],
+      }),
+    });
+
+    expect(
+      await screen.findByText('Performance Issues - Detector Threshold Settings')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Threshold Settings')).not.toBeInTheDocument();
+    expect(getMock).not.toHaveBeenCalled();
   });
 
   it('updates the field', async () => {
@@ -804,7 +815,6 @@ describe('projectPerformance', () => {
         features: [
           'performance-view',
           'performance-web-vitals-seer-suggestions',
-          'gen-ai-features',
           'ai-issue-detection',
         ],
       }),

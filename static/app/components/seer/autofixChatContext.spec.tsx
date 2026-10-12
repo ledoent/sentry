@@ -10,8 +10,8 @@ import {
 
 import {useAutofixChat} from 'sentry/components/seer/autofixChatContext';
 import {SeerExplorerChatStateProvider} from 'sentry/views/seerExplorer/seerExplorerChatStateContext';
+import {SeerExplorerContextProvider} from 'sentry/views/seerExplorer/seerExplorerContextProvider';
 import {SeerExplorerSessionsProvider} from 'sentry/views/seerExplorer/seerExplorerSessionContext';
-import {SeerExplorerContextProvider} from 'sentry/views/seerExplorer/useSeerExplorerContext';
 
 /**
  * A button elsewhere in the app. It renders outside the chat, so it only sees
@@ -62,7 +62,7 @@ describe('AutofixChatProvider', () => {
   const organization = OrganizationFixture({
     openMembership: true,
     hideAiFeatures: false,
-    features: ['seer-explorer', 'gen-ai-features'],
+    features: ['seer-explorer'],
   });
 
   const chatUrl = `/organizations/${organization.slug}/seer/explorer-chat/`;
