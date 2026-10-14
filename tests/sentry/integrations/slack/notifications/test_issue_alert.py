@@ -30,7 +30,6 @@ from sentry.notifications.types import (
     FineTuningAPIKey,
     NotificationOrigin,
 )
-from sentry.notifications.utils.rules import get_rule_or_workflow_id
 from sentry.plugins.base import Notification
 from sentry.silo.base import SiloMode
 from sentry.tasks.digests import deliver_digest
@@ -349,13 +348,13 @@ class SlackIssueAlertNotificationTest(SlackActivityNotificationTest, Performance
     def _assert_issue_owners_env_block(
         self, rule: Rule | NotificationOrigin, environment: Environment
     ) -> None:
-        _, workflow_id_value = get_rule_or_workflow_id(rule, prefer="workflow_id")
-        workflow_id = int(workflow_id_value)
         origin = (
             rule
             if isinstance(rule, NotificationOrigin)
             else NotificationOrigin.from_legacy_rule(rule)
         )
+        workflow_id = origin.workflow_id
+        assert workflow_id is not None
         event = self.store_event(
             data={"message": "Hello world", "level": "error", "environment": environment.name},
             project_id=self.project.id,
@@ -682,7 +681,12 @@ class SlackIssueAlertNotificationTest(SlackActivityNotificationTest, Performance
 
         key = f"mail:p:{self.project.id}"
         origin = NotificationOrigin.from_legacy_rule(rule)
-        backend.add(key, event_to_record(event, [origin]), increment_delay=0, maximum_delay=0)
+        backend.add(
+            key,
+            event_to_record(event.for_group(event.groups[0]), [origin]),
+            increment_delay=0,
+            maximum_delay=0,
+        )
 
         with self.tasks():
             deliver_digest(key)
@@ -990,7 +994,12 @@ class SlackIssueAlertNotificationTest(SlackActivityNotificationTest, Performance
 
         key = f"mail:p:{self.project.id}:IssueOwners::AllMembers"
         origin = NotificationOrigin.from_legacy_rule(rule)
-        backend.add(key, event_to_record(event, [origin]), increment_delay=0, maximum_delay=0)
+        backend.add(
+            key,
+            event_to_record(event.for_group(event.groups[0]), [origin]),
+            increment_delay=0,
+            maximum_delay=0,
+        )
 
         with self.tasks():
             deliver_digest(key)
