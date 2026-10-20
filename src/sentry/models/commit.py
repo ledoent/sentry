@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from django.db import models
 from django.db.models.query import QuerySet
@@ -16,7 +16,6 @@ from sentry.db.models import (
     cell_silo_model,
     sane_repr,
 )
-from sentry.db.models.fields.bounded import BoundedPositiveBigIntegerField
 from sentry.db.models.manager.base import BaseManager
 from sentry.utils.groupreference import find_referenced_groups
 
@@ -40,7 +39,7 @@ class Commit(Model):
 
     organization_id = BoundedBigIntegerField(db_index=True)
     repository_id = BoundedPositiveIntegerField()
-    new_repository_id = BoundedPositiveBigIntegerField(null=True)
+    new_repository_id = BoundedBigIntegerField(null=True)
     key = models.CharField(max_length=64)
     date_added = models.DateTimeField(default=timezone.now)
     # all commit metadata must be optional, as it may not be available
@@ -61,6 +60,13 @@ class Commit(Model):
         unique_together = (("repository_id", "key"),)
 
     __repr__ = sane_repr("organization_id", "repository_id", "key")
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.new_repository_id = self.repository_id
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "repository_id" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "new_repository_id"}
+        super().save(*args, **kwargs)
 
     @cached_property
     def title(self):
